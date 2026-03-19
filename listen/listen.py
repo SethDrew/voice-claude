@@ -18,9 +18,18 @@ __version__ = '2.1.0'
 CLR = '\033[K'
 HOME = '\033[2J\033[H'
 RED = '\033[91m'
+GRN = '\033[92m'
 YEL = '\033[93m'
 MAG = '\033[95m'  # Magenta/Purple
+DIM = '\033[2m'
 RST = '\033[0m'
+
+# Waveform characters (increasing height)
+BARS = ' ▁▂▃▄▅▆▇█'
+
+# Rolling waveform buffer
+WAVEFORM_WIDTH = 24
+level_history = [0.0] * WAVEFORM_WIDTH
 
 # Audio configuration (from config.py)
 SAMPLE_RATE = config.SAMPLE_RATE
@@ -184,35 +193,34 @@ def kbd_listen(q):
 
 
 def draw(level, txt='Listening', hint='', fullwidth=False):
-    """Draw progress bar - simple or full-width based on mode"""
+    """Draw rolling waveform dB meter"""
     # Skip UI in quiet/json mode
     if quiet_mode or json_mode:
         return
 
     out = sys.stderr if not is_tty else sys.stdout
-    hint_str = f'  {MAG}{hint}{RST}' if hint else ''
+    hint_str = f'  {DIM}{hint}{RST}' if hint else ''
 
-    if fullwidth:
-        # Full-width codevoice mode
-        try:
-            import shutil
-            terminal_width = shutil.get_terminal_size().columns
-        except:
-            terminal_width = 80
+    # Push new level into rolling buffer
+    level_history.pop(0)
+    level_history.append(level)
 
-        prefix_len = len('● ' + txt + '  ')
-        hint_len = len(hint) + 2 if hint else 0
-        available_width = max(10, terminal_width - prefix_len - hint_len - 4)
+    # Build waveform from history
+    waveform = ''
+    for l in level_history:
+        # Map level to bar index (0-8), with sensitivity boost
+        idx = min(int(l * 120), len(BARS) - 1)
+        # Color by intensity
+        if idx <= 1:
+            waveform += DIM + BARS[idx] + RST
+        elif idx <= 4:
+            waveform += GRN + BARS[idx] + RST
+        elif idx <= 6:
+            waveform += YEL + BARS[idx] + RST
+        else:
+            waveform += RED + BARS[idx] + RST
 
-        filled = max(0, min(int(level * available_width), available_width))
-        bar = '█' * filled + '░' * (available_width - filled)
-        out.write(f'\r{RED}●{RST} {txt}  [{YEL}{bar}{RST}]{hint_str}')
-    else:
-        # Simple mode - fixed width
-        filled = min(int(level * 200), 10)
-        bar = '=' * filled + ' ' * (10 - filled)
-        out.write(f'\r{RED}●{RST} {txt}  [{bar}]{hint_str}')
-
+    out.write(f'\r{RED}●{RST} {txt}  {waveform}{hint_str}{CLR}')
     out.flush()
 
 
@@ -221,6 +229,10 @@ def record(start_proc, lang, mdl):
 
     rec = []
     q = queue.Queue()
+
+    # Reset waveform buffer
+    for i in range(WAVEFORM_WIDTH):
+        level_history[i] = 0.0
 
     # Only start keyboard listener if not in signal mode
     if not signal_mode:
@@ -273,22 +285,8 @@ def record(start_proc, lang, mdl):
         log('Audio stream started')
         t0 = time.time()
 
-        while True:
+        while not signal_stop[0]:
             draw(lvl[0], hint=hint, fullwidth=codevoice_mode)
-
-            # Update status with current audio level
-            write_status({
-                'status': 'recording',
-                'audio_level': float(lvl[0]),
-                'pid': os.getpid(),
-                'language': lang,
-                'model': mdl,
-                'timestamp': int(time.time()),
-                'progress': 0.0,
-                'duration': time.time() - t0,
-                'mode': mode,
-                'transcription': None
-            })
 
             # Check signal stop (for signal mode)
             if signal_mode and signal_stop[0]:
@@ -335,7 +333,11 @@ def record(start_proc, lang, mdl):
                 except queue.Empty:
                     pass
 
-            time.sleep(0.01)  # Reduced from 0.05 for faster signal detection
+            try:
+                time.sleep(0.01)
+            except IOError:
+                # Signal can interrupt sleep — just continue the loop
+                pass
     except Exception as e:
         log(f'Error during recording: {e}')
         print(f'\n{e}', file=sys.stderr)
@@ -347,9 +349,15 @@ def record(start_proc, lang, mdl):
         })
         return None
     finally:
-        # Explicitly stop and close stream
-        stream.stop()
-        stream.close()
+        # Explicitly stop and close stream — abort first to prevent hanging
+        try:
+            stream.abort()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            pass
         log('Audio stream stopped and closed')
 
     for _ in range(3):
@@ -608,6 +616,17 @@ def process_recording(lang, mdl, sig_mode, codevoice):
     if sig_mode:
         signal.signal(signal.SIGUSR1, signal_handler)
         log('Signal mode enabled: listening for SIGUSR1')
+
+        # Write PID file for external tools (Hammerspoon) to signal us
+        pid_file = os.path.expanduser("~/.local/share/voice-router/listen.pid")
+        try:
+            os.makedirs(os.path.dirname(pid_file), exist_ok=True)
+            with open(pid_file, 'w') as f:
+                f.write(str(os.getpid()))
+            log(f'PID file written: {pid_file} (pid={os.getpid()})')
+        except OSError as e:
+            log(f'Failed to write PID file: {e}')
+
         # Show PID in stderr even in quiet/json mode (needed for signal)
         if quiet_mode or json_mode:
             pid = os.getpid()

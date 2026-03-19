@@ -3,6 +3,7 @@
 
 import argparse
 import asyncio
+import os
 import subprocess
 import sys
 
@@ -11,18 +12,44 @@ import iterm2
 from parser import parse
 from router import route_command, list_sessions
 
+PID_FILE = os.path.expanduser("~/.local/share/voice-router/listen.pid")
+
 
 def transcribe_hotkey() -> str:
-    """Run listen in VAD mode and return transcription."""
-    result = subprocess.run(
-        ["listen", "--vad", "3", "--quiet", "-m", "base"],
-        capture_output=True,
+    """Run listen in signal+VAD mode and return transcription.
+
+    Listen writes its own PID to a file so external tools (e.g. Hammerspoon)
+    can send SIGUSR1 to stop recording on key release.
+    VAD (10s silence) acts as a fallback if no signal arrives.
+    """
+    proc = subprocess.Popen(
+        ["listen", "--signal-mode", "--vad", "10", "-m", "base"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
     )
-    if result.returncode != 0:
-        print(f"listen failed: {result.stderr}", file=sys.stderr)
+
+    try:
+        stdout, stderr = proc.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+    finally:
+        # Clean up PID file
+        try:
+            os.unlink(PID_FILE)
+        except OSError:
+            pass
+
+    if proc.returncode != 0:
+        print(f"listen failed (exit {proc.returncode})", file=sys.stderr)
+        if stderr:
+            # Print last few lines of stderr for debugging
+            lines = stderr.strip().split("\n")
+            for line in lines[-5:]:
+                print(f"  {line}", file=sys.stderr)
         sys.exit(1)
-    return result.stdout.strip()
+    return stdout.strip()
 
 
 async def do_route(text: str) -> None:

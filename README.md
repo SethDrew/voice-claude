@@ -1,13 +1,13 @@
 # Voice Router for Claude Code
 
-Route voice commands to named Claude Code sessions running in iTerm2 tabs.
+Route voice commands to named Claude Code sessions running in iTerm2 tabs. Hold a key, speak a command, release — your words land in the right session.
 
 ## Architecture
 
 ```
-[Wake Word Daemon]  --or--  [Hammerspoon Hotkey]  --or--  [Phone HTTP POST]
-        |                          |                            |
-        v                          v                            v
+[Push-to-Talk Hotkey]  --or--  [CLI]  --or--  [Phone HTTP POST]
+        |                        |                    |
+        v                        v                    v
   +--------------------------------------------------------------+
   |                    Command Parser                             |
   |  "tell firmware: check GPIO" -> target=firmware, text="..."  |
@@ -26,15 +26,19 @@ Route voice commands to named Claude Code sessions running in iTerm2 tabs.
 ## Quick Start
 
 ```bash
-# Clone and install
+# Install (requires Python 3.10+, Homebrew, iTerm2)
 git clone https://github.com/SethDrew/voice-claude.git
 cd voice-claude
 ./setup.sh
-
-# Source updated PATH
 source ~/.zshrc
 
-# Launch named Claude Code sessions
+# Install Hammerspoon for push-to-talk hotkey
+brew install --cask hammerspoon
+
+# Start the listen daemon (keeps Whisper model warm for instant transcription)
+voice-listen-daemon &
+
+# Launch named Claude Code sessions in iTerm2 tabs
 cc firmware    # tab 1
 cc frontend    # tab 2
 cc backend     # tab 3
@@ -47,18 +51,20 @@ voice-route --list
 
 ## Input Methods
 
-### 1. Hotkey (Double-tap Fn)
+### 1. Push-to-Talk (Hold Option key)
 
-Requires Hammerspoon. Double-tap the Fn key to:
-1. Record speech (auto-stops after silence)
-2. Transcribe with Whisper
-3. Parse target session and command
-4. Route to the correct iTerm2 tab
+Requires Hammerspoon and the listen daemon running in the background.
+
+1. **Hold Option** — mic opens instantly, "Listening..." alert appears
+2. **Speak** — "tell firmware check the GPIO pins"
+3. **Release Option** — recording stops, Whisper transcribes, command routes to target session
+
+The listen daemon (`voice-listen-daemon`) keeps the Whisper model pre-loaded in memory, eliminating cold-start latency. Start it once and leave it running.
 
 ### 2. CLI
 
 ```bash
-# Record + transcribe + route
+# Record + transcribe + route (standalone, no daemon needed)
 voice-route --hotkey
 
 # Route pre-transcribed text
@@ -68,20 +74,7 @@ voice-route --text "tell firmware: check GPIO"
 voice-route --list
 ```
 
-### 3. Wake Word Daemon
-
-Listens continuously for wake words ("hey skynet", "hey destroyer", "hey code").
-
-```bash
-# Start daemon
-voice-daemon
-
-# Or install as launchd service (edit plist paths first)
-cp config/launchd/com.user.voice-router.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.user.voice-router.plist
-```
-
-### 4. Phone Server
+### 3. Phone Server
 
 HTTP endpoint for routing from a phone or other device.
 
@@ -106,7 +99,6 @@ curl http://<your-ip>:7890/sessions
 | `go to frontend` | target=frontend (focus only) |
 | `check the logs` | target=last-active, text="check the logs" |
 | `slash commit` | target=last-active, text="/commit" |
-| `hey skynet, tell firmware: check GPIO` | (wake phrase stripped first) |
 
 ## Named Sessions
 
@@ -120,30 +112,53 @@ cc my-project     # sets cc_name=my-project
 
 **Important:** Add `DISABLE_AUTO_TITLE="true"` to `~/.zshrc` (setup.sh does this) to prevent oh-my-zsh from overwriting tab titles.
 
-## Wake Word Training
-
-1. Use [OpenWakeWord](https://github.com/dscripka/openWakeWord) training notebooks on Google Colab
-2. Train models for your wake phrases (e.g., "hey skynet")
-3. Export as `.onnx` files
-4. Place in `models/` directory (or `~/.local/share/voice-router/models/` after install)
-
 ## File Layout
 
 ```
-~/.local/share/voice-router/    # Runtime: Python modules + venv
-~/.local/share/listen/          # STT: Whisper-based transcription
+src/
+  main.py              # CLI entry point (voice-route)
+  router.py            # iTerm2 session discovery + routing
+  parser.py            # Natural language command parsing
+  daemon.py            # Wake word detection daemon
+  listen_daemon.py     # Warm listen daemon (pre-loaded Whisper)
+  phone_server.py      # Flask REST API
+listen/
+  listen.py            # Whisper-based STT with waveform meter
+  config.py            # Audio/model configuration
+bin/
+  cc                   # Named session launcher
+  voice-route          # CLI entry point
+  voice-listen-daemon  # Warm daemon launcher
+  voice-daemon         # Wake word daemon launcher
+  voice-phone-server   # Phone server launcher
+config/
+  hammerspoon/         # Push-to-talk hotkey config
+  launchd/             # Auto-start plist
+```
+
+After install:
+```
+~/.local/share/voice-router/    # Runtime: Python modules + venv + daemon state
+~/.local/share/listen/          # STT: Whisper-based transcription + venv
 ~/.local/bin/                   # Launcher scripts (on PATH)
-~/.hammerspoon/init.lua         # Hotkey config (appended)
+~/.hammerspoon/init.lua         # Hotkey config (appended by setup.sh)
 ```
 
 ## Requirements
 
 - macOS with iTerm2
 - Python 3.10+
-- Homebrew (for portaudio)
+- Homebrew (for portaudio, ffmpeg)
+- ffmpeg (for Whisper audio decoding)
 - Claude Code CLI
-- Hammerspoon (optional, for hotkey)
-- Microphone access
+- Hammerspoon (for push-to-talk hotkey)
+- Microphone access granted to iTerm2
+- iTerm2 Python API enabled (Preferences > General > Magic)
+
+## Future Work
+
+- **Wake word detection**: Always-listening mode using OpenWakeWord with custom ONNX models. The daemon infrastructure (`src/daemon.py`) is in place but requires training wake word models (e.g., "hey skynet") via [OpenWakeWord](https://github.com/dscripka/openWakeWord) Colab notebooks and placing the `.onnx` files in `models/`.
+- **Faster STT**: faster-whisper support exists but needs testing with the daemon workflow.
 
 ## License
 
