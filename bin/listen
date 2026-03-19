@@ -1,0 +1,5 @@
+#!/bin/bash
+# STT launcher — activates listen venv and runs listen.py
+LISTEN_DIR="$HOME/.local/share/listen"
+source "$LISTEN_DIR/venv/bin/activate"
+exec python "$LISTEN_DIR/listen.py" "$@"
