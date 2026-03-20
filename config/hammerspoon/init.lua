@@ -25,6 +25,9 @@ end
 local function signalDaemon(sig)
     local pid = getDaemonPid()
     if pid then
+        -- Check process is alive before signaling
+        local _, status = hs.execute("kill -0 " .. pid .. " 2>/dev/null")
+        if not status then return false end
         hs.execute("kill -" .. sig .. " " .. pid)
         return true
     end
@@ -92,6 +95,10 @@ local function ensurePolling()
         -- Stop when nothing pending and queue drained
         if voiceRouter.pendingCount <= 0 and #voiceRouter.routeQueue == 0
            and not voiceRouter.routing and not voiceRouter.optDown then
+            -- Truncate results file to prevent unbounded growth
+            local f = io.open(voiceRouter.resultsFile, "w")
+            if f then f:close() end
+            voiceRouter.lastResultLine = 0
             voiceRouter.pollTimer:stop()
             voiceRouter.pollTimer = nil
         end

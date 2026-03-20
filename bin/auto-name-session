@@ -23,18 +23,20 @@ iterm_sid="${TERM_SESSION_ID##*:}"
 # Already named? Ensure iTerm2 has the variable set and exit.
 existing_name="$(jq -r --arg sid "$session_id" '.[$sid] // empty' "$REGISTRY_FILE" 2>/dev/null)"
 if [ -n "$existing_name" ]; then
-    "$ROUTER_VENV/bin/python3" -c "
-import asyncio, iterm2
+    ITERM_SID="$iterm_sid" SESSION_NAME="$existing_name" "$ROUTER_VENV/bin/python3" -c "
+import asyncio, iterm2, os
+name = os.environ['SESSION_NAME']
+sid = os.environ['ITERM_SID']
 async def main():
     conn = await iterm2.Connection.async_create()
     app = await iterm2.async_get_app(conn)
     for w in app.windows:
         for t in w.tabs:
             for s in t.sessions:
-                if s.session_id == '$iterm_sid':
-                    await s.async_set_variable('user.cc_name', '$existing_name')
+                if s.session_id == sid:
+                    await s.async_set_variable('user.cc_name', name)
                     update = iterm2.LocalWriteOnlyProfile()
-                    update.set_name('$existing_name')
+                    update.set_name(name)
                     await s.async_set_profile_properties(update)
                     return
 asyncio.run(main())
@@ -93,18 +95,20 @@ else
 fi
 
 # Set iTerm2 session name via Python API using exact session ID
-"$ROUTER_VENV/bin/python3" -c "
-import asyncio, iterm2
+ITERM_SID="$iterm_sid" SESSION_NAME="$name" "$ROUTER_VENV/bin/python3" -c "
+import asyncio, iterm2, os
+name = os.environ['SESSION_NAME']
+sid = os.environ['ITERM_SID']
 async def main():
     conn = await iterm2.Connection.async_create()
     app = await iterm2.async_get_app(conn)
     for w in app.windows:
         for t in w.tabs:
             for s in t.sessions:
-                if s.session_id == '$iterm_sid':
-                    await s.async_set_variable('user.cc_name', '$name')
+                if s.session_id == sid:
+                    await s.async_set_variable('user.cc_name', name)
                     update = iterm2.LocalWriteOnlyProfile()
-                    update.set_name('$name')
+                    update.set_name(name)
                     await s.async_set_profile_properties(update)
                     return
 asyncio.run(main())

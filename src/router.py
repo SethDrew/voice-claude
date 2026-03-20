@@ -37,8 +37,9 @@ def _load_name_registry() -> dict:
 def _fuzzy_match(query: str, candidate: str) -> bool:
     """Check if query is a fuzzy/partial match for candidate.
 
-    Matches if query appears as a substring of candidate, or if candidate
-    appears as a substring of query. Both are case-insensitive.
+    Matches if query appears as a substring of candidate (case-insensitive).
+    Very short queries (< 2 chars) require an exact match to avoid
+    false positives (e.g. session named "a" matching everything).
     Examples:
         - "firmware" matches "dock-firmware"
         - "dock" matches "dock-firmware"
@@ -46,7 +47,9 @@ def _fuzzy_match(query: str, candidate: str) -> bool:
     """
     q = query.lower()
     c = candidate.lower()
-    return q in c or c in q
+    if len(q) < 2:
+        return q == c  # exact match only for very short queries
+    return q in c
 
 
 def get_last_active() -> Optional[str]:

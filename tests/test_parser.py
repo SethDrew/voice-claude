@@ -8,7 +8,7 @@ import unittest
 # Add src to path so we can import parser
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from parser import parse, strip_wake_phrase, replace_slash_commands, ParsedCommand
+from parser import parse, strip_wake_phrase, replace_slash_commands, ParsedCommand, _load_known_sessions, _fuzzy_session_match
 
 
 class TestStripWakePhrase(unittest.TestCase):
@@ -118,6 +118,109 @@ class TestParse(unittest.TestCase):
         cmd = parse("  tell firmware :  check GPIO  ")
         self.assertEqual(cmd.target, "firmware")
         self.assertEqual(cmd.text, "check GPIO")
+
+    def test_for_pattern(self):
+        cmd = parse("for firmware, check GPIO pins")
+        self.assertEqual(cmd.target, "firmware")
+        self.assertEqual(cmd.text, "check GPIO pins")
+
+    def test_for_pattern_no_comma(self):
+        cmd = parse("for firmware check GPIO pins")
+        self.assertEqual(cmd.target, "firmware")
+        self.assertEqual(cmd.text, "check GPIO pins")
+
+    def test_for_pattern_colon(self):
+        cmd = parse("for firmware: check GPIO pins")
+        self.assertEqual(cmd.target, "firmware")
+        self.assertEqual(cmd.text, "check GPIO pins")
+
+
+class TestHallucinationFilter(unittest.TestCase):
+    def test_thank_you(self):
+        cmd = parse("Thank you.")
+        self.assertIsNone(cmd.target)
+        self.assertIsNone(cmd.text)
+
+    def test_thank_you_for_watching(self):
+        cmd = parse("Thank you for watching!")
+        self.assertIsNone(cmd.target)
+        self.assertIsNone(cmd.text)
+
+    def test_bye(self):
+        cmd = parse("Bye.")
+        self.assertIsNone(cmd.target)
+        self.assertIsNone(cmd.text)
+
+    def test_subscribe(self):
+        cmd = parse("Subscribe")
+        self.assertIsNone(cmd.target)
+        self.assertIsNone(cmd.text)
+
+    def test_you(self):
+        cmd = parse("You")
+        self.assertIsNone(cmd.target)
+        self.assertIsNone(cmd.text)
+
+    def test_real_text_not_filtered(self):
+        cmd = parse("check the error logs")
+        self.assertIsNone(cmd.target)
+        self.assertEqual(cmd.text, "check the error logs")
+
+
+class TestFillerWordStripping(unittest.TestCase):
+    def test_uh_stripped(self):
+        cmd = parse("uh check the logs")
+        self.assertIsNone(cmd.target)
+        self.assertEqual(cmd.text, "check the logs")
+
+    def test_um_stripped(self):
+        cmd = parse("um tell firmware check GPIO")
+        self.assertEqual(cmd.target, "firmware")
+        self.assertEqual(cmd.text, "check GPIO")
+
+    def test_so_stripped(self):
+        cmd = parse("so check the logs")
+        self.assertIsNone(cmd.target)
+        self.assertEqual(cmd.text, "check the logs")
+
+    def test_okay_stripped(self):
+        cmd = parse("okay tell firmware check GPIO")
+        self.assertEqual(cmd.target, "firmware")
+        self.assertEqual(cmd.text, "check GPIO")
+
+    def test_basically_stripped(self):
+        cmd = parse("basically check the logs")
+        self.assertIsNone(cmd.target)
+        self.assertEqual(cmd.text, "check the logs")
+
+
+class TestInOnPatternRemoved(unittest.TestCase):
+    """The in/on pattern was too greedy — 'in general the build is failing' would target 'general'."""
+    def test_in_not_parsed_as_verb(self):
+        """'in <word>' should not use in/on verb pattern to extract a target."""
+        cmd = parse("in theory the build should pass")
+        # Should NOT extract 'theory' as a target via in/on pattern
+        # (may still match via session name lookup, but the verb pattern is gone)
+        self.assertNotEqual(cmd.target, "theory")
+
+    def test_on_not_parsed_as_verb(self):
+        """'on <word>' should not use in/on verb pattern to extract a target."""
+        cmd = parse("on the other hand we could refactor")
+        self.assertNotEqual(cmd.target, "the")
+
+
+class TestFuzzySessionMatch(unittest.TestCase):
+    def test_short_word_rejected(self):
+        self.assertIsNone(_fuzzy_session_match("a", ["alpha", "beta"]))
+
+    def test_substring_match(self):
+        self.assertEqual(_fuzzy_session_match("firm", ["firmware", "frontend"]), "firmware")
+
+    def test_no_match(self):
+        self.assertIsNone(_fuzzy_session_match("xyz", ["firmware", "frontend"]))
+
+    def test_exact_match(self):
+        self.assertEqual(_fuzzy_session_match("firmware", ["firmware", "frontend"]), "firmware")
 
 
 if __name__ == "__main__":
