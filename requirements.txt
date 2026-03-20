@@ -3,3 +3,4 @@ openwakeword
 sounddevice
 numpy
 flask
+rapidfuzz>=3.0.0

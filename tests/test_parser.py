@@ -8,6 +8,8 @@ import unittest
 # Add src to path so we can import parser
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
+from unittest.mock import patch
+
 from parser import parse, strip_wake_phrase, replace_slash_commands, ParsedCommand, _load_known_sessions, _fuzzy_session_match
 
 
@@ -221,6 +223,32 @@ class TestFuzzySessionMatch(unittest.TestCase):
 
     def test_exact_match(self):
         self.assertEqual(_fuzzy_session_match("firmware", ["firmware", "frontend"]), "firmware")
+
+    def test_fuzzy_misspelling(self):
+        """Voice transcription 'firmwear' should match 'firmware'."""
+        self.assertEqual(_fuzzy_session_match("firmwear", ["firmware", "frontend"]), "firmware")
+
+    def test_joined_words(self):
+        """'firm ware' should match 'firmware' via joined form."""
+        self.assertEqual(_fuzzy_session_match("firm ware", ["firmware", "frontend"]), "firmware")
+
+
+class TestTargetFirstJoined(unittest.TestCase):
+    """Test that first-two-words joining works for target detection."""
+
+    @patch('parser._load_known_sessions', return_value=["firmware", "frontend"])
+    def test_firm_wear_check_gpio(self, mock_sessions):
+        """'firm wear check GPIO' should route to firmware."""
+        cmd = parse("firm wear check GPIO")
+        self.assertEqual(cmd.target, "firmware")
+        self.assertEqual(cmd.text, "check GPIO")
+
+    @patch('parser._load_known_sessions', return_value=["firmware", "frontend"])
+    def test_front_end_add_button(self, mock_sessions):
+        """'front end add a button' should route to frontend."""
+        cmd = parse("front end add a button")
+        self.assertEqual(cmd.target, "frontend")
+        self.assertEqual(cmd.text, "add a button")
 
 
 if __name__ == "__main__":

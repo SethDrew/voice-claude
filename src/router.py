@@ -4,10 +4,12 @@
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
 import iterm2
+from rapidfuzz import fuzz
 
 STATE_DIR = Path.home() / ".local" / "share" / "voice-router"
 STATE_FILE = STATE_DIR / "state.json"
@@ -37,19 +39,38 @@ def _load_name_registry() -> dict:
 def _fuzzy_match(query: str, candidate: str) -> bool:
     """Check if query is a fuzzy/partial match for candidate.
 
-    Matches if query appears as a substring of candidate (case-insensitive).
+    Uses rapidfuzz for robust matching of voice-transcribed session names.
     Very short queries (< 2 chars) require an exact match to avoid
     false positives (e.g. session named "a" matching everything).
     Examples:
         - "firmware" matches "dock-firmware"
         - "dock" matches "dock-firmware"
-        - "dock-firmware" matches "dock-firmware"
+        - "firm wear" matches "firmware" (via joined form)
     """
     q = query.lower()
     c = candidate.lower()
     if len(q) < 2:
         return q == c  # exact match only for very short queries
-    return q in c
+
+    # Fast path: direct substring match
+    if q in c:
+        return True
+
+    # Join words (remove spaces/hyphens) and retry substring
+    q_joined = re.sub(r'[\s\-]+', '', q)
+    c_joined = re.sub(r'[\s\-]+', '', c)
+    if q_joined in c_joined:
+        return True
+
+    # Fuzzy ratio check
+    if fuzz.ratio(q_joined, c_joined) >= 65:
+        return True
+
+    # Partial ratio check
+    if fuzz.partial_ratio(q_joined, c_joined) >= 80:
+        return True
+
+    return False
 
 
 def get_last_active() -> Optional[str]:

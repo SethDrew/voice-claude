@@ -82,9 +82,27 @@ else
     info "Listen venv exists"
 fi
 source "$LISTEN_INSTALL/venv/bin/activate"
+
+# Apple Silicon detection for MLX Whisper
+ARCH=$(uname -m)
+if [[ "$ARCH" == "arm64" ]]; then
+    info "Apple Silicon detected — installing mlx-whisper for accelerated transcription"
+    pip install -q mlx-whisper>=0.4.0 || warn "mlx-whisper install failed (optional — will fall back to faster-whisper)"
+fi
+
 pip install -q -r "$SCRIPT_DIR/requirements-listen.txt"
 deactivate
 info "Listen dependencies installed"
+
+# --- Optional: Ollama check ---
+echo ""
+if command -v ollama >/dev/null 2>&1; then
+    info "Ollama found — LLM routing available"
+else
+    warn "Ollama not found (optional — enables LLM-based voice routing)"
+    warn "  Install: brew install ollama"
+    warn "  Then:    ollama pull llama3.2:3b"
+fi
 
 # --- Copy source files ---
 info "Installing source files..."

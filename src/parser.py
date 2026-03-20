@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from rapidfuzz import fuzz
+
 WAKE_PHRASES = [
     "hey skynet",
     "hey destroyer",
@@ -58,13 +60,44 @@ def _load_known_sessions() -> list[str]:
         return []
 
 def _fuzzy_session_match(word: str, sessions: list[str]) -> str | None:
-    """Check if a word fuzzy-matches any known session name."""
+    """Check if a word fuzzy-matches any known session name.
+
+    Uses rapidfuzz to handle voice transcription errors like
+    'firm wear' -> 'firmware'.
+    """
     word_lower = word.lower()
     if len(word_lower) < 2:
         return None
+
+    word_joined = re.sub(r'[\s\-]+', '', word_lower)
+
+    best_match = None
+    best_score = 0
+
     for name in sessions:
-        if word_lower in name.lower() or name.lower() in word_lower:
+        name_lower = name.lower()
+        name_joined = re.sub(r'[\s\-]+', '', name_lower)
+
+        # Direct substring match (fast path)
+        if word_lower in name_lower or name_lower in word_lower:
             return name
+
+        # Joined substring match
+        if word_joined in name_joined or name_joined in word_joined:
+            return name
+
+        # Fuzzy scoring on joined forms
+        score = max(
+            fuzz.ratio(word_joined, name_joined),
+            fuzz.partial_ratio(word_joined, name_joined),
+        )
+        if score > best_score:
+            best_score = score
+            best_match = name
+
+    if best_score >= 65:
+        return best_match
+
     return None
 
 def parse(raw: str) -> ParsedCommand:
@@ -126,8 +159,24 @@ def parse(raw: str) -> ParsedCommand:
             text=replace_slash_commands(m.group(2).strip()),
         )
 
-    # Target-first: if first word matches a known session name, treat as <target> <text>
+    # Target-first: if first word(s) match a known session name, treat as <target> <text>
     sessions = _load_known_sessions()
+    all_words = text.split()
+
+    # Try joining first two words first (handles "firm wear" -> "firmware")
+    # This must come before single-word match so "firm wear X" doesn't get
+    # matched as target="firmware" text="wear X" via the single-word "firm".
+    if len(all_words) >= 3:
+        joined_first_two = all_words[0] + all_words[1]
+        matched = _fuzzy_session_match(joined_first_two, sessions)
+        if matched:
+            remainder = " ".join(all_words[2:])
+            return ParsedCommand(
+                target=matched,
+                text=replace_slash_commands(remainder.strip()),
+            )
+
+    # Single first word match
     words = text.split(None, 1)
     if len(words) >= 2:
         matched = _fuzzy_session_match(words[0], sessions)
@@ -136,6 +185,19 @@ def parse(raw: str) -> ParsedCommand:
                 target=matched,
                 text=replace_slash_commands(words[1].strip()),
             )
+
+    # LLM fallback — try Ollama-based routing if available
+    try:
+        from llm_router import is_available, llm_parse
+        if is_available():
+            result = llm_parse(text, sessions if sessions else _load_known_sessions())
+            if result and (result.get("target") or result.get("text")):
+                return ParsedCommand(
+                    target=result.get("target"),
+                    text=replace_slash_commands(result["text"]) if result.get("text") else None,
+                )
+    except ImportError:
+        pass
 
     # Bare text — route to last-active
     return ParsedCommand(target=None, text=text)

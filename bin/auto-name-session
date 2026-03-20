@@ -52,20 +52,51 @@ fi
 first_msg="$(head -c 5000 "$transcript_path" 2>/dev/null | jq -r 'select(.type == "user") | .message.content // empty' 2>/dev/null | head -1)"
 [ -z "$first_msg" ] && echo '{"suppressOutput":true}' && exit 0
 
-# Extract key words
-stopwords='a|an|the|this|that|is|are|was|were|be|been|being|have|has|had|do|does|did|will|would|could|should|can|may|might|shall|must|i|me|my|we|our|you|your|it|its|he|she|they|them|his|her|their|to|of|in|for|on|at|by|with|from|up|out|if|or|and|but|not|no|so|as|just|about|into|than|then|some|any|all|each|every|how|what|when|where|which|who|why|take|look|check|please|help|want|need|tell|make|get|go|see|know|think|come|give|use|find|here|there|very|also|only|really|much|many|like|well|back|even|still|way|thing|right|good|new|now|try|these|those|let|hi|hey|hello|ok|okay|sure|yeah|yes'
+# Collect existing names for collision avoidance
+existing_names="$(jq -r 'to_entries[].value' "$REGISTRY_FILE" 2>/dev/null | paste -sd',' - 2>/dev/null)" || true
 
-words="$(echo "$first_msg" \
-    | tr '[:upper:]' '[:lower:]' \
-    | tr -cs 'a-z0-9' ' ' \
-    | tr -s ' ' \
-    | sed 's/^ //;s/ $//' \
-    | tr ' ' '\n' \
-    | grep -vxE "($stopwords)" 2>/dev/null \
-    | head -2 \
-    | paste -sd'-' - 2>/dev/null)" || true
+# Try claude -p first for intelligent naming
+name=""
+if command -v claude >/dev/null 2>&1; then
+    t0=$(date +%s)
+    claude_prompt="Generate a single-word codename for a coding session. The first message in this session was: \"${first_msg:0:500}\"
 
-name="${words:-}"
+Rules:
+- Exactly one word, lowercase, letters and digits only
+- Must match regex: ^[a-z][a-z0-9]{1,29}$
+- Must be memorable and related to the task
+- Must NOT be any of these existing names: ${existing_names:-none}
+- Reply with ONLY the codename, nothing else"
+
+    claude_name="$(timeout 15 claude -p "$claude_prompt" 2>/dev/null)" || true
+    t1=$(date +%s)
+    elapsed=$((t1 - t0))
+    # Log timing for tuning
+    echo "[auto-name] claude -p took ${elapsed}s" >&2
+
+    # Validate: must match ^[a-z][a-z0-9]{1,29}$
+    claude_name="$(echo "$claude_name" | tr -d '[:space:]')"
+    if [[ "$claude_name" =~ ^[a-z][a-z0-9]{1,29}$ ]]; then
+        name="$claude_name"
+    fi
+fi
+
+# Fall back to keyword extraction if claude -p failed
+if [ -z "$name" ]; then
+    stopwords='a|an|the|this|that|is|are|was|were|be|been|being|have|has|had|do|does|did|will|would|could|should|can|may|might|shall|must|i|me|my|we|our|you|your|it|its|he|she|they|them|his|her|their|to|of|in|for|on|at|by|with|from|up|out|if|or|and|but|not|no|so|as|just|about|into|than|then|some|any|all|each|every|how|what|when|where|which|who|why|take|look|check|please|help|want|need|tell|make|get|go|see|know|think|come|give|use|find|here|there|very|also|only|really|much|many|like|well|back|even|still|way|thing|right|good|new|now|try|these|those|let|hi|hey|hello|ok|okay|sure|yeah|yes'
+
+    words="$(echo "$first_msg" \
+        | tr '[:upper:]' '[:lower:]' \
+        | tr -cs 'a-z0-9' ' ' \
+        | tr -s ' ' \
+        | sed 's/^ //;s/ $//' \
+        | tr ' ' '\n' \
+        | grep -vxE "($stopwords)" 2>/dev/null \
+        | head -2 \
+        | paste -sd'-' - 2>/dev/null)" || true
+
+    name="${words:-}"
+fi
 
 # Fallback to directory name
 if [ -z "$name" ] || [ "${#name}" -lt 2 ]; then

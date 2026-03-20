@@ -31,13 +31,18 @@ listen_dir = os.path.expanduser("~/.local/share/listen")
 sys.path.insert(0, listen_dir)
 import config
 
-# Try faster-whisper first, fall back to openai-whisper
+# Three-tier import: mlx_whisper > faster_whisper > openai-whisper
+BACKEND = None
 try:
-    from faster_whisper import WhisperModel
-    FASTER = True
+    import mlx_whisper
+    BACKEND = "mlx"
 except ImportError:
-    import whisper
-    FASTER = False
+    try:
+        from faster_whisper import WhisperModel
+        BACKEND = "faster"
+    except ImportError:
+        import whisper
+        BACKEND = "openai"
 
 # Paths
 STATE_DIR = os.path.expanduser("~/.local/share/voice-router")
@@ -47,7 +52,18 @@ PID_FILE = os.path.join(STATE_DIR, "listen-daemon.pid")
 # Audio config
 SAMPLE_RATE = config.SAMPLE_RATE
 CHANNELS = config.CHANNELS
-MODEL_NAME = "base"
+
+# Model constants
+MLX_MODEL = "mlx-community/whisper-large-v3-turbo"
+FALLBACK_MODEL = "base"
+
+# Initial prompt with coding vocabulary to guide transcription
+INITIAL_PROMPT = (
+    "Claude Code, firmware, frontend, backend, GPIO, API, SDK, CLI, "
+    "slash commit, slash review, slash compact, slash clear, slash diff, "
+    "hey skynet, hey destroyer, hey code, "
+    "refactor, deploy, debug, repository, pull request, merge, rebase"
+)
 
 # Recording state
 recording = False
@@ -91,11 +107,25 @@ def transcribe_frames(frames_copy, seq_num):
             w.writeframes((data * 32767).astype(np.int16).tobytes())
 
         t0 = time.time()
-        if FASTER:
-            segments, info = model.transcribe(tmp.name, language="en", beam_size=5)
+        if BACKEND == "mlx":
+            result = mlx_whisper.transcribe(
+                tmp.name,
+                path_or_hf_repo=MLX_MODEL,
+                language="en",
+                initial_prompt=INITIAL_PROMPT,
+            )
+            text = result["text"].strip()
+        elif BACKEND == "faster":
+            segments, info = model.transcribe(
+                tmp.name, language="en", beam_size=5,
+                initial_prompt=INITIAL_PROMPT,
+            )
             text = "".join(s.text for s in segments).strip()
         else:
-            r = model.transcribe(tmp.name, language="en", fp16=False, verbose=False)
+            r = model.transcribe(
+                tmp.name, language="en", fp16=False, verbose=False,
+                initial_prompt=INITIAL_PROMPT,
+            )
             text = r["text"].strip()
 
         elapsed = time.time() - t0
@@ -193,13 +223,38 @@ def main():
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
 
-    print(f"[daemon] loading whisper model '{MODEL_NAME}'...", flush=True)
+    if BACKEND == "mlx":
+        model_name = MLX_MODEL
+    else:
+        model_name = FALLBACK_MODEL
+
+    print(f"[daemon] loading whisper model '{model_name}' (backend={BACKEND})...", flush=True)
     t0 = time.time()
-    if FASTER:
-        model = WhisperModel(MODEL_NAME, device="cpu", compute_type="int8")
+    if BACKEND == "mlx":
+        # MLX Whisper is stateless (model loaded per-call), but we do a warmup
+        # transcription to trigger model download and cache into memory.
+        warmup_file = os.path.join(tempfile.gettempdir(), "voice-router-warmup.wav")
+        with wave.open(warmup_file, "wb") as w:
+            w.setnchannels(CHANNELS)
+            w.setsampwidth(2)
+            w.setframerate(SAMPLE_RATE)
+            # 0.5s of silence
+            w.writeframes(b'\x00' * (SAMPLE_RATE * CHANNELS * 2 // 2))
+        try:
+            mlx_whisper.transcribe(warmup_file, path_or_hf_repo=MLX_MODEL, language="en")
+        except Exception as e:
+            print(f"[daemon] mlx warmup note: {e}", flush=True)
+        try:
+            os.unlink(warmup_file)
+        except OSError:
+            pass
+        model = None  # MLX is stateless
+        print(f"[daemon] mlx-whisper warmed up in {time.time()-t0:.2f}s", flush=True)
+    elif BACKEND == "faster":
+        model = WhisperModel(model_name, device="cpu", compute_type="int8")
         print(f"[daemon] faster-whisper loaded in {time.time()-t0:.2f}s", flush=True)
     else:
-        model = whisper.load_model(MODEL_NAME)
+        model = whisper.load_model(model_name)
         print(f"[daemon] whisper loaded in {time.time()-t0:.2f}s", flush=True)
 
     signal.signal(signal.SIGUSR1, start_recording)
