@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Voice router CLI — hotkey mode, text mode, and session listing."""
+"""Voice router CLI — hotkey mode, text mode, resolve mode, and session listing."""
 
 import argparse
 import asyncio
@@ -10,18 +10,13 @@ import sys
 import iterm2
 
 from parser import parse
-from router import route_command, list_sessions
+from router import route_command, find_session, list_sessions, get_last_active
 
 PID_FILE = os.path.expanduser("~/.local/share/voice-router/listen.pid")
 
 
 def transcribe_hotkey() -> str:
-    """Run listen in signal+VAD mode and return transcription.
-
-    Listen writes its own PID to a file so external tools (e.g. Hammerspoon)
-    can send SIGUSR1 to stop recording on key release.
-    VAD (10s silence) acts as a fallback if no signal arrives.
-    """
+    """Run listen in signal+VAD mode and return transcription."""
     proc = subprocess.Popen(
         ["listen", "--signal-mode", "--vad", "10", "-m", "base"],
         stdout=subprocess.PIPE,
@@ -35,7 +30,6 @@ def transcribe_hotkey() -> str:
         proc.kill()
         stdout, stderr = proc.communicate()
     finally:
-        # Clean up PID file
         try:
             os.unlink(PID_FILE)
         except OSError:
@@ -44,7 +38,6 @@ def transcribe_hotkey() -> str:
     if proc.returncode != 0:
         print(f"listen failed (exit {proc.returncode})", file=sys.stderr)
         if stderr:
-            # Print last few lines of stderr for debugging
             lines = stderr.strip().split("\n")
             for line in lines[-5:]:
                 print(f"  {line}", file=sys.stderr)
@@ -71,6 +64,41 @@ async def do_route(text: str) -> None:
         print(desc)
 
 
+async def do_route_to_target(target: str, text: str) -> None:
+    """Route text directly to a named target (skip parsing)."""
+    connection = await iterm2.Connection.async_create()
+    success = await route_command(connection, target, text)
+    if success:
+        print(f"→ {target}: {text[:60]}")
+
+
+async def do_resolve(text: str) -> None:
+    """Resolve which session a command would target, without routing.
+
+    Prints the resolved session name to stdout. Used by Hammerspoon
+    for the two-press flow (first press = resolve target, second = route).
+    Always goes through the router's fuzzy matching to get the actual
+    session name (e.g., "ledger" → "ledger-skill").
+    """
+    cmd = parse(text)
+    search = cmd.target or text.strip().lower()
+
+    connection = await iterm2.Connection.async_create()
+    session = await find_session(connection, search)
+    if session:
+        cc_name = await session.async_get_variable("user.cc_name")
+        if cc_name:
+            print(cc_name)
+            return
+
+    # Fall back to last-active
+    last = get_last_active()
+    if last:
+        print(last)
+    else:
+        sys.exit(1)
+
+
 async def do_list() -> None:
     """List available cc sessions."""
     connection = await iterm2.Connection.async_create()
@@ -87,7 +115,11 @@ def main():
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument("--hotkey", action="store_true", help="Record + transcribe + route")
     group.add_argument("--text", type=str, help="Route pre-transcribed text")
+    group.add_argument("--resolve", type=str, help="Resolve target session without routing")
     group.add_argument("--list", action="store_true", help="List available cc sessions")
+
+    ap.add_argument("--target", type=str, help="Route directly to this target (with --text)")
+
     args = ap.parse_args()
 
     if args.hotkey:
@@ -97,6 +129,12 @@ def main():
             sys.exit(0)
         print(f"Heard: {raw}")
         asyncio.run(do_route(raw))
+
+    elif args.resolve:
+        asyncio.run(do_resolve(args.resolve))
+
+    elif args.text and args.target:
+        asyncio.run(do_route_to_target(args.target, args.text))
 
     elif args.text:
         asyncio.run(do_route(args.text))

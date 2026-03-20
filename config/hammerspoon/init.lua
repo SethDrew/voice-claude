@@ -1,6 +1,9 @@
 
--- voice-router hotkey — press Right Option to record, release to stop
+-- voice-router hotkey — two-press flow:
+--   Press 1: say target name → shows "→ firmware" overlay
+--   Press 2: say command → routes to confirmed target
 -- Uses warm listen daemon for instant mic activation
+
 local voiceRouter = {}
 voiceRouter.optDown = false
 voiceRouter.stateFile = os.getenv("HOME") .. "/.local/share/voice-router/daemon-state.json"
@@ -10,8 +13,115 @@ voiceRouter.pollTimer = nil
 voiceRouter.routeQueue = {}
 voiceRouter.routing = false
 voiceRouter.lastResultLine = 0
-voiceRouter.pendingCount = 0  -- how many recordings are still being transcribed
-voiceRouter.micAlert = nil
+voiceRouter.pendingCount = 0
+voiceRouter.canvas = nil
+
+-- Two-press state
+voiceRouter.pendingTarget = nil      -- confirmed target from first press
+voiceRouter.targetTimeout = nil      -- timer to clear pending target
+voiceRouter.targetOverlay = nil      -- canvas showing target name
+
+-- Icon overlay for recording indicator
+local iconPath = os.getenv("HOME") .. "/Documents/projects/voice-claude/icon.png"
+
+local function showMicIndicator()
+    if voiceRouter.canvas then
+        voiceRouter.canvas:delete()
+        voiceRouter.canvas = nil
+    end
+
+    local screen = hs.screen.mainScreen()
+    local frame = screen:fullFrame()
+    local size = 96
+
+    voiceRouter.canvas = hs.canvas.new({
+        x = frame.x + frame.w / 2 - size / 2,
+        y = frame.y + frame.h / 2 - size / 2,
+        w = size,
+        h = size,
+    })
+
+    local img = hs.image.imageFromPath(iconPath)
+    if img then
+        voiceRouter.canvas:appendElements({
+            type = "image",
+            image = img,
+            frame = { x = "0%", y = "0%", w = "100%", h = "100%" },
+            imageScaling = "shrinkToFit",
+        })
+        voiceRouter.canvas:level(hs.canvas.windowLevels.overlay)
+        voiceRouter.canvas:behavior(hs.canvas.windowBehaviors.canJoinAllSpaces
+            + hs.canvas.windowBehaviors.stationary)
+        voiceRouter.canvas:show()
+    else
+        hs.alert.show("🎤", nil, nil, 60)
+    end
+end
+
+local function hideMicIndicator()
+    if voiceRouter.canvas then
+        voiceRouter.canvas:delete()
+        voiceRouter.canvas = nil
+    end
+    hs.alert.closeAll()
+end
+
+local function showTargetOverlay(targetName)
+    -- Clear any existing target overlay
+    if voiceRouter.targetOverlay then
+        voiceRouter.targetOverlay:delete()
+        voiceRouter.targetOverlay = nil
+    end
+
+    local screen = hs.screen.mainScreen()
+    local frame = screen:fullFrame()
+    local width = 300
+    local height = 50
+
+    voiceRouter.targetOverlay = hs.canvas.new({
+        x = frame.x + frame.w / 2 - width / 2,
+        y = frame.y + frame.h / 2 + 60,  -- below the mic icon
+        w = width,
+        h = height,
+    })
+
+    voiceRouter.targetOverlay:appendElements(
+        {
+            type = "rectangle",
+            action = "fill",
+            fillColor = { red = 0.1, green = 0.1, blue = 0.1, alpha = 0.85 },
+            roundedRectRadii = { xRadius = 10, yRadius = 10 },
+        },
+        {
+            type = "text",
+            text = "→ " .. targetName,
+            textColor = { red = 0.3, green = 0.9, blue = 0.5, alpha = 1.0 },
+            textSize = 22,
+            textAlignment = "center",
+            frame = { x = "5%", y = "15%", w = "90%", h = "70%" },
+        }
+    )
+    voiceRouter.targetOverlay:level(hs.canvas.windowLevels.overlay)
+    voiceRouter.targetOverlay:behavior(hs.canvas.windowBehaviors.canJoinAllSpaces
+        + hs.canvas.windowBehaviors.stationary)
+    voiceRouter.targetOverlay:show()
+end
+
+local function hideTargetOverlay()
+    if voiceRouter.targetOverlay then
+        voiceRouter.targetOverlay:delete()
+        voiceRouter.targetOverlay = nil
+    end
+end
+
+local function clearPendingTarget()
+    voiceRouter.pendingTarget = nil
+    hideTargetOverlay()
+    if voiceRouter.targetTimeout then
+        voiceRouter.targetTimeout:stop()
+        voiceRouter.targetTimeout = nil
+    end
+end
 
 local function getDaemonPid()
     local f = io.open(voiceRouter.pidFile, "r")
@@ -25,13 +135,64 @@ end
 local function signalDaemon(sig)
     local pid = getDaemonPid()
     if pid then
-        -- Check process is alive before signaling
         local _, status = hs.execute("kill -0 " .. pid .. " 2>/dev/null")
         if not status then return false end
         hs.execute("kill -" .. sig .. " " .. pid)
         return true
     end
     return false
+end
+
+local function resolveTarget(text)
+    -- Call voice-route --resolve to get the target without routing
+    local env = {
+        PATH = os.getenv("HOME") .. "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        HOME = os.getenv("HOME"),
+    }
+
+    local task = hs.task.new(
+        os.getenv("HOME") .. "/.local/bin/voice-route",
+        function(exitCode, stdout, stderr)
+            local target = nil
+            if exitCode == 0 and stdout then
+                target = stdout:match("^%s*(.-)%s*$")
+            end
+
+            if target and #target > 0 then
+                voiceRouter.pendingTarget = target
+                showTargetOverlay(target)
+
+                -- Auto-clear after 15 seconds
+                if voiceRouter.targetTimeout then voiceRouter.targetTimeout:stop() end
+                voiceRouter.targetTimeout = hs.timer.doAfter(15, function()
+                    clearPendingTarget()
+                end)
+            else
+                -- Couldn't resolve — show error briefly
+                hs.alert.show("? no session found", nil, nil, 1.5)
+            end
+        end,
+        {"--resolve", text}
+    )
+    task:setEnvironment(env)
+    task:start()
+end
+
+local function routeToTarget(target, text)
+    local env = {
+        PATH = os.getenv("HOME") .. "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        HOME = os.getenv("HOME"),
+    }
+
+    local task = hs.task.new(
+        os.getenv("HOME") .. "/.local/bin/voice-route",
+        function(exitCode, stdout, stderr)
+            voiceRouter.routing = false
+        end,
+        {"--target", target, "--text", text}
+    )
+    task:setEnvironment(env)
+    task:start()
 end
 
 local function processQueue()
@@ -46,21 +207,16 @@ local function processQueue()
         return
     end
 
-    local env = {
-        PATH = os.getenv("HOME") .. "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        HOME = os.getenv("HOME"),
-    }
-
-    local task = hs.task.new(
-        os.getenv("HOME") .. "/.local/bin/voice-route",
-        function(exitCode, stdout, stderr)
-            voiceRouter.routing = false
-            processQueue()
-        end,
-        {"--text", text}
-    )
-    task:setEnvironment(env)
-    task:start()
+    if voiceRouter.pendingTarget then
+        -- Second press: route to confirmed target
+        local target = voiceRouter.pendingTarget
+        clearPendingTarget()
+        routeToTarget(target, text)
+    else
+        -- First press: resolve target from speech
+        voiceRouter.routing = false
+        resolveTarget(text)
+    end
 end
 
 local function consumeResults()
@@ -76,7 +232,6 @@ local function consumeResults()
                 table.insert(voiceRouter.routeQueue, result.text)
                 voiceRouter.pendingCount = math.max(0, voiceRouter.pendingCount - 1)
             elseif ok then
-                -- empty transcription, still decrement pending
                 voiceRouter.pendingCount = math.max(0, voiceRouter.pendingCount - 1)
             end
             voiceRouter.lastResultLine = lineNum
@@ -92,10 +247,8 @@ local function ensurePolling()
     voiceRouter.pollTimer = hs.timer.doEvery(0.15, function()
         consumeResults()
 
-        -- Stop when nothing pending and queue drained
         if voiceRouter.pendingCount <= 0 and #voiceRouter.routeQueue == 0
            and not voiceRouter.routing and not voiceRouter.optDown then
-            -- Truncate results file to prevent unbounded growth
             local f = io.open(voiceRouter.resultsFile, "w")
             if f then f:close() end
             voiceRouter.lastResultLine = 0
@@ -117,14 +270,12 @@ voiceRouter.tap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, functi
     if optOnly and not voiceRouter.optDown then
         voiceRouter.optDown = true
         signalDaemon("USR1")
-        -- Show mic indicator (stays until we close it on release)
-        hs.alert.closeAll()
-        voiceRouter.micAlert = hs.alert.show("🎤", nil, nil, 60)
+        showMicIndicator()
 
     elseif not rightOpt and voiceRouter.optDown then
         voiceRouter.optDown = false
         signalDaemon("USR2")
-        hs.alert.closeAll()
+        hideMicIndicator()
         voiceRouter.pendingCount = voiceRouter.pendingCount + 1
         ensurePolling()
     end
