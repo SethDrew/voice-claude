@@ -282,9 +282,21 @@ def main():
     print(f"[daemon] ready (pid={os.getpid()})", flush=True)
 
     # Main event loop — all real work happens here, not in signal handlers
+    os.set_blocking(sig_read, False)
     while True:
-        select.select([sig_read], [], [])
-        data = os.read(sig_read, 16)  # drain multiple queued signals
+        try:
+            select.select([sig_read], [], [], 1.0)  # 1s timeout as safety
+        except (InterruptedError, OSError):
+            continue
+
+        try:
+            data = os.read(sig_read, 64)
+        except (BlockingIOError, OSError):
+            continue
+
+        if not data:
+            continue
+
         for b in data:
             if b == (signal.SIGUSR1 & 0xFF):
                 do_start_recording()
