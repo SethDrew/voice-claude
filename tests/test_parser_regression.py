@@ -7,6 +7,7 @@ Covers issues:
   #10  Whisper hallucinations routed as commands
   #13  Multi-word session names split — "test 2" parsed wrong
   #14  Whisper mishears session names — "built-up" != "built-app"
+  #15  "tell built" routed to ledger-skill instead of built-app
 """
 
 import os
@@ -394,3 +395,97 @@ class TestTargetFirstPattern:
         cmd = parse("firmware")
         # Single word, no remaining text — falls through to bare text
         assert cmd.target is None or cmd.text is None
+
+
+# ======================================================================
+# Issue #15: "tell built" routed to ledger-skill instead of built-app
+# ======================================================================
+
+class TestIssue15TellBuiltMisroute:
+    """'tell built <text>' should target 'built-app', never 'ledger-skill'.
+
+    Root cause: the parser's _fuzzy_session_match used a single threshold
+    of 65 for max(ratio, partial_ratio). This was too aggressive for
+    partial_ratio, causing false positives like:
+      - partial_ratio("built", "ipaddrthunderbolt") = 66.7
+      - partial_ratio("tell", "test") = 66.7
+    Fix: use separate thresholds (ratio >= 65, partial_ratio >= 80),
+    consistent with the router's _fuzzy_match.
+    """
+
+    def test_tell_built_parses_correctly(self):
+        """'tell built Ollama is installed' should extract target='built'."""
+        cmd = parse("tell built Ollama is installed and I'd like to use that")
+        assert cmd.target == "built"
+        assert "Ollama is installed" in cmd.text
+
+    @patch('parser._load_known_sessions', return_value=[
+        "built-app", "ipaddr-thunderbolt", "ledger-skill",
+    ])
+    def test_built_matches_built_app_not_others(self, mock_sessions):
+        """In target-first mode, 'built' should match 'built-app'."""
+        result = _fuzzy_session_match("built", [
+            "built-app", "ipaddr-thunderbolt", "ledger-skill",
+        ])
+        assert result == "built-app"
+
+    def test_built_does_not_match_ipaddr_thunderbolt(self):
+        """'built' must NOT fuzzy match 'ipaddr-thunderbolt'.
+
+        partial_ratio("built", "ipaddrthunderbolt") = 66.7.
+        Before the fix, the 65 threshold allowed this false positive.
+        """
+        result = _fuzzy_session_match("built", ["ipaddr-thunderbolt"])
+        assert result is None
+
+    def test_built_does_not_match_ledger_skill(self):
+        """'built' must NOT fuzzy match 'ledger-skill'."""
+        result = _fuzzy_session_match("built", ["ledger-skill"])
+        assert result is None
+
+    def test_tell_does_not_match_test_session(self):
+        """Verb 'tell' must NOT match session 'test' in fuzzy matching.
+
+        partial_ratio("tell", "test") = 66.7. Before the fix, this
+        passed the 65 threshold, causing the target-first pattern to
+        match "tell" as a session name.
+        """
+        result = _fuzzy_session_match("tell", ["test", "test-2"])
+        assert result is None
+
+    def test_tell_does_not_match_ledger_skill(self):
+        """Verb 'tell' must NOT match session 'ledger-skill'."""
+        result = _fuzzy_session_match("tell", ["ledger-skill"])
+        assert result is None
+
+    @patch('parser._load_known_sessions', return_value=[
+        "built-app", "ipaddr-thunderbolt", "ledger-skill",
+    ])
+    def test_tell_built_full_parse_routes_correctly(self, mock_sessions):
+        """Full parse: 'tell built <text>' should route via verb pattern,
+        not target-first, and produce target='built'.
+        """
+        cmd = parse("tell built Ollama is installed")
+        assert cmd.target == "built"
+        assert cmd.text == "Ollama is installed"
+
+    @patch('parser._load_known_sessions', return_value=[
+        "built-app", "ipaddr-thunderbolt", "ledger-skill",
+    ])
+    def test_built_without_verb_routes_to_built_app(self, mock_sessions):
+        """Without verb: 'built Ollama is installed' should target 'built-app'
+        via the target-first pattern.
+        """
+        cmd = parse("built Ollama is installed")
+        assert cmd.target == "built-app"
+
+    def test_legitimate_fuzzy_matches_still_work(self):
+        """Ensure the fix doesn't break legitimate fuzzy matches."""
+        # 'builtup' vs 'builtapp': ratio ~77, should still match
+        assert _fuzzy_session_match("built-up", ["built-app"]) == "built-app"
+        # 'firmwear' vs 'firmware': ratio ~92, should still match
+        assert _fuzzy_session_match("firmwear", ["firmware"]) == "firmware"
+        # 'firm wear' vs 'firmware': joined substring match
+        assert _fuzzy_session_match("firm wear", ["firmware"]) == "firmware"
+        # 'front end' vs 'frontend': joined substring match
+        assert _fuzzy_session_match("front end", ["frontend"]) == "frontend"

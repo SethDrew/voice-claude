@@ -1,31 +1,44 @@
 #!/usr/bin/env python3
-"""Ollama-based LLM routing for voice commands.
+"""MLX-LM-based LLM routing for voice commands.
 
-Uses a local Ollama instance to parse ambiguous voice commands into
+Uses a local MLX language model to parse ambiguous voice commands into
 structured {target, text} pairs when fuzzy matching fails.
 """
 
 import json
-import urllib.request
-import urllib.error
+import logging
 
-OLLAMA_URL = "http://localhost:11434"
-OLLAMA_MODEL = "llama3.2:3b"
-TIMEOUT = 2  # seconds
+MLX_MODEL_NAME = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+
+logger = logging.getLogger(__name__)
+
+# Lazy-loaded singleton for model and tokenizer
+_model = None
+_tokenizer = None
+
+
+def _load_model():
+    """Load and cache the MLX model and tokenizer (lazy singleton)."""
+    global _model, _tokenizer
+    if _model is None:
+        from mlx_lm import load
+        logger.info("Loading MLX model %s (first call, may take a few seconds)...", MLX_MODEL_NAME)
+        _model, _tokenizer = load(MLX_MODEL_NAME)
+        logger.info("MLX model loaded successfully.")
+    return _model, _tokenizer
 
 
 def is_available() -> bool:
-    """Check if Ollama is running on localhost:11434."""
+    """Check if mlx_lm is importable and functional."""
     try:
-        req = urllib.request.Request(f"{OLLAMA_URL}/api/tags", method="GET")
-        with urllib.request.urlopen(req, timeout=TIMEOUT):
-            return True
-    except (urllib.error.URLError, OSError, TimeoutError):
+        import mlx_lm  # noqa: F401
+        return True
+    except ImportError:
         return False
 
 
 def llm_parse(raw_text: str, sessions: list[str]) -> dict | None:
-    """Use Ollama to parse a voice command into target and text.
+    """Use a local MLX model to parse a voice command into target and text.
 
     Args:
         raw_text: The transcribed voice text.
@@ -48,31 +61,19 @@ def llm_parse(raw_text: str, sessions: list[str]) -> dict | None:
         "Do not include any other text in your response."
     )
 
-    payload = {
-        "model": OLLAMA_MODEL,
-        "messages": [
+    try:
+        from mlx_lm import generate
+
+        model, tokenizer = _load_model()
+
+        messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": raw_text},
-        ],
-        "stream": False,
-        "options": {
-            "temperature": 0.0,
-            "num_predict": 100,
-        },
-    }
-
-    try:
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            f"{OLLAMA_URL}/api/chat",
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        ]
+        prompt = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, tokenize=False
         )
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-
-        content = body.get("message", {}).get("content", "")
+        content = generate(model, tokenizer, prompt=prompt, max_tokens=100)
 
         # Try to parse JSON from the response
         # Strip markdown code fences if present
@@ -102,6 +103,6 @@ def llm_parse(raw_text: str, sessions: list[str]) -> dict | None:
             "text": result.get("text"),
         }
 
-    except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError,
-            KeyError, ValueError):
+    except (ImportError, json.JSONDecodeError, KeyError, ValueError, Exception) as e:
+        logger.debug("llm_parse failed: %s", e)
         return None

@@ -4,6 +4,7 @@
 Covers issues:
   #9   Fuzzy match too aggressive — session 'a' matches everything
   #14  Whisper mishears session names — fuzzy matching behavior
+  #15  "tell built" routed to ledger-skill instead of built-app
 """
 
 import asyncio
@@ -138,6 +139,48 @@ class TestFuzzyMatchEdgeCases:
     def test_similar_length_different_content(self):
         """Same-length strings with different content."""
         assert _fuzzy_match("abcdefgh", "zyxwvuts") is False
+
+
+# ======================================================================
+# Issue #15: "tell built" routed to ledger-skill
+# ======================================================================
+
+class TestIssue15TellBuiltMisroute:
+    """'tell built' should route to 'built-app', not 'ledger-skill'.
+
+    Root cause: the parser's _fuzzy_session_match used a single threshold
+    of 65 for max(ratio, partial_ratio). partial_ratio("built",
+    "ipaddrthunderbolt") = 66.7 caused a false positive when "built-app"
+    was absent from the session list. The router's _fuzzy_match already
+    used separate thresholds (ratio >= 65, partial_ratio >= 80).
+    """
+
+    def test_built_matches_built_app_in_router(self):
+        """Router: 'built' should match 'built-app' (substring)."""
+        assert _fuzzy_match("built", "built-app") is True
+
+    def test_built_does_not_match_ledger_skill(self):
+        """Router: 'built' must NOT match 'ledger-skill'."""
+        assert _fuzzy_match("built", "ledger-skill") is False
+
+    def test_built_does_not_match_ipaddr_thunderbolt(self):
+        """Router: 'built' must NOT match 'ipaddr-thunderbolt'.
+
+        partial_ratio("built", "ipaddrthunderbolt") = 66.7 which is
+        below the router's partial_ratio threshold of 80.
+        """
+        assert _fuzzy_match("built", "ipaddr-thunderbolt") is False
+
+    def test_tell_does_not_match_test(self):
+        """Router: 'tell' (a verb) must NOT match session 'test'.
+
+        partial_ratio("tell", "test") = 66.7, below the 80 threshold.
+        """
+        assert _fuzzy_match("tell", "test") is False
+
+    def test_tell_does_not_match_ledger_skill(self):
+        """Router: 'tell' must NOT match 'ledger-skill'."""
+        assert _fuzzy_match("tell", "ledger-skill") is False
 
 
 # ======================================================================

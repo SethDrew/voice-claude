@@ -73,6 +73,8 @@ def _fuzzy_session_match(word: str, sessions: list[str]) -> str | None:
 
     best_match = None
     best_score = 0
+    best_ratio = 0
+    best_partial = 0
 
     for name in sessions:
         name_lower = name.lower()
@@ -86,16 +88,24 @@ def _fuzzy_session_match(word: str, sessions: list[str]) -> str | None:
         if word_joined in name_joined or name_joined in word_joined:
             return name
 
-        # Fuzzy scoring on joined forms
-        score = max(
-            fuzz.ratio(word_joined, name_joined),
-            fuzz.partial_ratio(word_joined, name_joined),
-        )
+        # Fuzzy scoring on joined forms — track ratio and partial_ratio
+        # separately so we can apply different thresholds (matching the
+        # router's _fuzzy_match logic)
+        ratio = fuzz.ratio(word_joined, name_joined)
+        partial = fuzz.partial_ratio(word_joined, name_joined)
+        score = max(ratio, partial)
         if score > best_score:
             best_score = score
+            best_ratio = ratio
+            best_partial = partial
             best_match = name
 
-    if best_score >= 65:
+    # Use separate thresholds consistent with the router's _fuzzy_match:
+    # ratio >= 65 catches genuine misspellings (e.g. "firmwear" vs "firmware")
+    # partial_ratio >= 80 catches partial matches without false positives
+    # (a single threshold of 65 on max() was too aggressive — e.g.
+    # partial_ratio("built","ipaddrthunderbolt")=66.7 falsely matched)
+    if best_match and (best_ratio >= 65 or best_partial >= 80):
         return best_match
 
     return None
