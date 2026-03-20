@@ -1,6 +1,15 @@
 #!/bin/bash
-# Warm listen daemon launcher
+# Warm listen daemon launcher with auto-restart on crash
 LISTEN_DIR="$HOME/.local/share/listen"
 ROUTER_DIR="$HOME/.local/share/voice-router"
 source "$LISTEN_DIR/venv/bin/activate"
-PYTHONPATH="$LISTEN_DIR" exec python "$ROUTER_DIR/listen_daemon.py" "$@"
+
+while true; do
+    PYTHONPATH="$LISTEN_DIR" python "$ROUTER_DIR/listen_daemon.py" "$@"
+    EXIT_CODE=$?
+    if [ $EXIT_CODE -eq 0 ]; then
+        break  # Clean shutdown (SIGTERM/SIGINT)
+    fi
+    echo "[voice-listen-daemon] crashed (exit $EXIT_CODE), restarting in 1s..." >&2
+    sleep 1
+done

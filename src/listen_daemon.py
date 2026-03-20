@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Warm listen daemon — stays running with model pre-loaded.
 
-Protocol (signal-based):
+Protocol (signal-based, using self-pipe for safety):
   SIGUSR1 = start recording
   SIGUSR2 = stop recording → transcribe → write result
   SIGTERM = shutdown
+
+Signal handlers are minimal (write a byte to a pipe). All real work
+runs in the main loop, avoiding signal-handler reentrancy issues with
+MLX's Metal GPU threads.
 
 State written to ~/.local/share/voice-router/daemon-state.json:
   {"state": "idle"}
@@ -16,6 +20,7 @@ State written to ~/.local/share/voice-router/daemon-state.json:
 
 import json
 import os
+import select
 import signal
 import sys
 import tempfile
@@ -48,6 +53,7 @@ except ImportError:
 STATE_DIR = os.path.expanduser("~/.local/share/voice-router")
 STATE_FILE = os.path.join(STATE_DIR, "daemon-state.json")
 PID_FILE = os.path.join(STATE_DIR, "listen-daemon.pid")
+RESULTS_FILE = os.path.join(STATE_DIR, "daemon-results.jsonl")
 
 # Audio config
 SAMPLE_RATE = config.SAMPLE_RATE
@@ -70,7 +76,10 @@ recording = False
 rec_frames = []
 stream = None
 model = None
-seq = 0  # sequence number for each recording
+seq = 0
+
+# Lock to serialize MLX transcription calls — prevents concurrent Metal GPU access
+_transcribe_lock = threading.Lock()
 
 
 def write_state(state, **extra):
@@ -87,64 +96,62 @@ def audio_callback(data, frames, t, status):
         rec_frames.append(data.copy())
 
 
-RESULTS_FILE = os.path.join(STATE_DIR, "daemon-results.jsonl")
-
-
 def transcribe_frames(frames_copy, seq_num):
-    """Transcribe audio in a background thread so signal handlers stay responsive."""
-    write_state("transcribing", seq=seq_num)
+    """Transcribe audio — serialized by _transcribe_lock to prevent concurrent MLX access."""
+    with _transcribe_lock:
+        write_state("transcribing", seq=seq_num)
 
-    try:
-        data = np.concatenate(frames_copy)
-        if data.ndim > 1:
-            data = data.flatten()
+        try:
+            data = np.concatenate(frames_copy)
+            if data.ndim > 1:
+                data = data.flatten()
 
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        with wave.open(tmp.name, "wb") as w:
-            w.setnchannels(CHANNELS)
-            w.setsampwidth(2)
-            w.setframerate(SAMPLE_RATE)
-            w.writeframes((data * 32767).astype(np.int16).tobytes())
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            with wave.open(tmp.name, "wb") as w:
+                w.setnchannels(CHANNELS)
+                w.setsampwidth(2)
+                w.setframerate(SAMPLE_RATE)
+                w.writeframes((data * 32767).astype(np.int16).tobytes())
 
-        t0 = time.time()
-        if BACKEND == "mlx":
-            result = mlx_whisper.transcribe(
-                tmp.name,
-                path_or_hf_repo=MLX_MODEL,
-                language="en",
-                initial_prompt=INITIAL_PROMPT,
-            )
-            text = result["text"].strip()
-        elif BACKEND == "faster":
-            segments, info = model.transcribe(
-                tmp.name, language="en", beam_size=5,
-                initial_prompt=INITIAL_PROMPT,
-            )
-            text = "".join(s.text for s in segments).strip()
-        else:
-            r = model.transcribe(
-                tmp.name, language="en", fp16=False, verbose=False,
-                initial_prompt=INITIAL_PROMPT,
-            )
-            text = r["text"].strip()
+            t0 = time.time()
+            if BACKEND == "mlx":
+                result = mlx_whisper.transcribe(
+                    tmp.name,
+                    path_or_hf_repo=MLX_MODEL,
+                    language="en",
+                    initial_prompt=INITIAL_PROMPT,
+                )
+                text = result["text"].strip()
+            elif BACKEND == "faster":
+                segments, info = model.transcribe(
+                    tmp.name, language="en", beam_size=5,
+                    initial_prompt=INITIAL_PROMPT,
+                )
+                text = "".join(s.text for s in segments).strip()
+            else:
+                r = model.transcribe(
+                    tmp.name, language="en", fp16=False, verbose=False,
+                    initial_prompt=INITIAL_PROMPT,
+                )
+                text = r["text"].strip()
 
-        elapsed = time.time() - t0
-        print(f"[daemon] [{seq_num}] transcribed in {elapsed:.2f}s: {text!r}", flush=True)
+            elapsed = time.time() - t0
+            print(f"[daemon] [{seq_num}] transcribed in {elapsed:.2f}s: {text!r}", flush=True)
 
-        os.unlink(tmp.name)
+            os.unlink(tmp.name)
 
-        # Append to results file (ordered queue for Hammerspoon to consume)
-        with open(RESULTS_FILE, "a") as f:
-            f.write(json.dumps({"seq": seq_num, "text": text}) + "\n")
+            with open(RESULTS_FILE, "a") as f:
+                f.write(json.dumps({"seq": seq_num, "text": text}) + "\n")
 
-        write_state("done", text=text, seq=seq_num)
+            write_state("done", text=text, seq=seq_num)
 
-    except Exception as e:
-        write_state("error", error=str(e), seq=seq_num)
-        print(f"[daemon] [{seq_num}] transcription error: {e}", flush=True)
+        except Exception as e:
+            write_state("error", error=str(e), seq=seq_num)
+            print(f"[daemon] [{seq_num}] transcription error: {e}", flush=True)
 
 
-def start_recording(signum, frame):
+def do_start_recording():
+    """Start recording — called from main loop, NOT from a signal handler."""
     global recording, rec_frames, stream, seq
     if recording:
         return
@@ -169,14 +176,14 @@ def start_recording(signum, frame):
         print(f"[daemon] failed to start recording: {e}", flush=True)
 
 
-def stop_recording(signum, frame):
+def do_stop_recording():
+    """Stop recording and spawn transcription — called from main loop."""
     global recording, stream
     if not recording:
         return
 
     recording = False
 
-    # Stop mic immediately
     if stream:
         try:
             stream.abort()
@@ -191,14 +198,14 @@ def stop_recording(signum, frame):
         write_state("done", text="")
         return
 
-    # Transcribe in background thread so we can receive new signals immediately
     frames_copy = list(rec_frames)
     current_seq = seq
     rec_frames.clear()
     threading.Thread(target=transcribe_frames, args=(frames_copy, current_seq), daemon=True).start()
 
 
-def shutdown(signum, frame):
+def do_shutdown():
+    """Clean shutdown — called from main loop."""
     global recording, stream
     print("[daemon] shutting down", flush=True)
     if stream:
@@ -231,14 +238,11 @@ def main():
     print(f"[daemon] loading whisper model '{model_name}' (backend={BACKEND})...", flush=True)
     t0 = time.time()
     if BACKEND == "mlx":
-        # MLX Whisper is stateless (model loaded per-call), but we do a warmup
-        # transcription to trigger model download and cache into memory.
         warmup_file = os.path.join(tempfile.gettempdir(), "voice-router-warmup.wav")
         with wave.open(warmup_file, "wb") as w:
             w.setnchannels(CHANNELS)
             w.setsampwidth(2)
             w.setframerate(SAMPLE_RATE)
-            # 0.5s of silence
             w.writeframes(b'\x00' * (SAMPLE_RATE * CHANNELS * 2 // 2))
         try:
             mlx_whisper.transcribe(warmup_file, path_or_hf_repo=MLX_MODEL, language="en")
@@ -248,7 +252,7 @@ def main():
             os.unlink(warmup_file)
         except OSError:
             pass
-        model = None  # MLX is stateless
+        model = None
         print(f"[daemon] mlx-whisper warmed up in {time.time()-t0:.2f}s", flush=True)
     elif BACKEND == "faster":
         model = WhisperModel(model_name, device="cpu", compute_type="int8")
@@ -257,16 +261,37 @@ def main():
         model = whisper.load_model(model_name)
         print(f"[daemon] whisper loaded in {time.time()-t0:.2f}s", flush=True)
 
-    signal.signal(signal.SIGUSR1, start_recording)
-    signal.signal(signal.SIGUSR2, stop_recording)
-    signal.signal(signal.SIGTERM, shutdown)
-    signal.signal(signal.SIGINT, shutdown)
+    # Self-pipe pattern: signal handlers write a byte to the pipe,
+    # main loop reads from it. This keeps signal handlers trivial
+    # and avoids interrupting MLX Metal GPU operations.
+    sig_read, sig_write = os.pipe()
+    os.set_blocking(sig_write, False)
+
+    def _sig_handler(signum, frame):
+        try:
+            os.write(sig_write, bytes([signum & 0xFF]))
+        except OSError:
+            pass
+
+    signal.signal(signal.SIGUSR1, _sig_handler)
+    signal.signal(signal.SIGUSR2, _sig_handler)
+    signal.signal(signal.SIGTERM, _sig_handler)
+    signal.signal(signal.SIGINT, _sig_handler)
 
     write_state("idle")
     print(f"[daemon] ready (pid={os.getpid()})", flush=True)
 
+    # Main event loop — all real work happens here, not in signal handlers
     while True:
-        signal.pause()
+        select.select([sig_read], [], [])
+        data = os.read(sig_read, 16)  # drain multiple queued signals
+        for b in data:
+            if b == (signal.SIGUSR1 & 0xFF):
+                do_start_recording()
+            elif b == (signal.SIGUSR2 & 0xFF):
+                do_stop_recording()
+            elif b in ((signal.SIGTERM & 0xFF), (signal.SIGINT & 0xFF)):
+                do_shutdown()
 
 
 if __name__ == "__main__":
