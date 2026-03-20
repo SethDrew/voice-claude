@@ -143,12 +143,13 @@ def parse(raw: str) -> ParsedCommand:
             text=replace_slash_commands(m.group(2).strip()),
         )
 
-    # "<verb> <target> <text>" without colon
+    # "<verb> <target> [to] <text>" without colon — strip leading "to" from text
     m = re.match(rf'^{verbs}\s+(\S+)\s+(.+)$', text, re.IGNORECASE)
     if m:
+        cmd_text = re.sub(r'^to\s+', '', m.group(2).strip(), flags=re.IGNORECASE)
         return ParsedCommand(
             target=m.group(1).lower(),
-            text=replace_slash_commands(m.group(2).strip()),
+            text=replace_slash_commands(cmd_text),
         )
 
     # "for <target>, <text>" / "for <target> <text>"
