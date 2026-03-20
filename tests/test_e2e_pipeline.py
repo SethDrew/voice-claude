@@ -595,12 +595,19 @@ class TestBlackHoleLoopback:
         )
         rec_stream.start()
 
-        # Play to BlackHole output
-        sd.play(audio_data, samplerate=sample_rate, device=bh_output)
-        sd.wait()
+        # Small delay to ensure recording stream is ready
+        time.sleep(0.3)
 
-        # Wait a bit for the recording to finish
-        time.sleep(0.5)
+        # Play to BlackHole output in a separate thread to avoid device conflicts
+        def play_audio():
+            sd.play(audio_data, samplerate=sample_rate, device=bh_output)
+            sd.wait()
+        play_thread = threading.Thread(target=play_audio)
+        play_thread.start()
+        play_thread.join(timeout=10)
+
+        # Wait for loopback audio to arrive
+        time.sleep(1.0)
 
         rec_stream.abort()
         rec_stream.close()
