@@ -227,6 +227,17 @@ def main():
 
     os.makedirs(STATE_DIR, exist_ok=True)
 
+    # Singleton guard: exit if another daemon is already running
+    if os.path.exists(PID_FILE):
+        try:
+            old_pid = int(open(PID_FILE).read().strip())
+            if old_pid != os.getpid():
+                os.kill(old_pid, 0)  # check if alive
+                print(f"[daemon] another instance running (pid={old_pid}), exiting", flush=True)
+                sys.exit(0)
+        except (ProcessLookupError, ValueError, OSError):
+            pass  # stale PID file, process already dead
+
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
 
