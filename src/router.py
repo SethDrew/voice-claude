@@ -11,6 +11,7 @@ import iterm2
 
 STATE_DIR = Path.home() / ".local" / "share" / "voice-router"
 STATE_FILE = STATE_DIR / "state.json"
+NAME_REGISTRY_FILE = STATE_DIR / "name-registry.json"
 
 
 def _load_state() -> dict:
@@ -25,6 +26,29 @@ def _save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state))
 
 
+def _load_name_registry() -> dict:
+    """Load the session name registry (session_id -> name)."""
+    try:
+        return json.loads(NAME_REGISTRY_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _fuzzy_match(query: str, candidate: str) -> bool:
+    """Check if query is a fuzzy/partial match for candidate.
+
+    Matches if query appears as a substring of candidate, or if candidate
+    appears as a substring of query. Both are case-insensitive.
+    Examples:
+        - "firmware" matches "dock-firmware"
+        - "dock" matches "dock-firmware"
+        - "dock-firmware" matches "dock-firmware"
+    """
+    q = query.lower()
+    c = candidate.lower()
+    return q in c or c in q
+
+
 def get_last_active() -> Optional[str]:
     return _load_state().get("last_active")
 
@@ -36,40 +60,85 @@ def set_last_active(name: str) -> None:
 
 
 async def find_session(connection: iterm2.Connection, name: str) -> Optional[iterm2.Session]:
-    """Find a session by cc_name user variable, falling back to tab title."""
+    """Find a session by cc_name user variable, tab title, or name registry.
+
+    Priority:
+    1. Exact match on cc_name user variable
+    2. Fuzzy match on cc_name user variable
+    3. Fuzzy match on session/tab title
+    4. Fuzzy match via name registry (session_id -> name mapping)
+    """
     app = await iterm2.async_get_app(connection)
     name_lower = name.lower()
 
-    # First pass: match on cc_name user variable
+    # Collect all sessions for multi-pass matching
+    all_sessions = []
     for window in app.windows:
         for tab in window.tabs:
             for session in tab.sessions:
-                try:
-                    cc_name = await session.async_get_variable("user.cc_name")
-                    if cc_name and cc_name.lower() == name_lower:
-                        return session
-                except Exception:
-                    continue
+                all_sessions.append(session)
 
-    # Second pass: match on tab title (partial match)
-    for window in app.windows:
-        for tab in window.tabs:
-            for session in tab.sessions:
-                try:
-                    title = await session.async_get_variable("name")
-                    if title and name_lower in title.lower():
-                        return session
-                except Exception:
-                    continue
+    # Pass 1: exact match on cc_name user variable (highest priority)
+    for session in all_sessions:
+        try:
+            cc_name = await session.async_get_variable("user.cc_name")
+            if cc_name and cc_name.lower() == name_lower:
+                return session
+        except Exception:
+            continue
+
+    # Pass 2: fuzzy/partial match on cc_name user variable
+    for session in all_sessions:
+        try:
+            cc_name = await session.async_get_variable("user.cc_name")
+            if cc_name and _fuzzy_match(name, cc_name):
+                return session
+        except Exception:
+            continue
+
+    # Pass 3: fuzzy/partial match on session name / tab title
+    for session in all_sessions:
+        try:
+            title = await session.async_get_variable("name")
+            if title and _fuzzy_match(name, title):
+                return session
+        except Exception:
+            continue
+
+    # Pass 4: match via name registry as fallback
+    registry = _load_name_registry()
+    if registry:
+        # Build a map of session_id -> iterm2.Session for lookup
+        session_map = {}
+        for session in all_sessions:
+            session_map[session.session_id] = session
+
+        # Check registry entries for fuzzy match on the registered name
+        for reg_session_id, reg_name in registry.items():
+            if _fuzzy_match(name, reg_name):
+                # Find the iTerm2 session that corresponds to this registry entry.
+                # The registry stores Claude Code session IDs, not iTerm2 session IDs,
+                # so we check if any session's cc_session_id or title matches.
+                # As a practical fallback, try to match by checking terminal titles
+                # that may have been set by the hook.
+                for session in all_sessions:
+                    try:
+                        title = await session.async_get_variable("name")
+                        if title and reg_name.lower() in title.lower():
+                            return session
+                    except Exception:
+                        continue
 
     return None
 
 
 async def list_sessions(connection: iterm2.Connection) -> list[dict]:
-    """Return all sessions with cc_name set."""
+    """Return all sessions with cc_name set, supplemented by name registry."""
     app = await iterm2.async_get_app(connection)
     sessions = []
+    seen_session_ids = set()
 
+    # First: gather sessions that have cc_name set
     for window in app.windows:
         for tab in window.tabs:
             for session in tab.sessions:
@@ -82,8 +151,32 @@ async def list_sessions(connection: iterm2.Connection) -> list[dict]:
                             "title": title,
                             "session_id": session.session_id,
                         })
+                        seen_session_ids.add(session.session_id)
                 except Exception:
                     continue
+
+    # Second: check name registry for sessions that may not have cc_name set
+    # but do have a terminal title matching a registry name
+    registry = _load_name_registry()
+    if registry:
+        for window in app.windows:
+            for tab in window.tabs:
+                for session in tab.sessions:
+                    if session.session_id in seen_session_ids:
+                        continue
+                    try:
+                        title = await session.async_get_variable("name") or ""
+                        for reg_name in registry.values():
+                            if title and reg_name.lower() in title.lower():
+                                sessions.append({
+                                    "name": reg_name,
+                                    "title": title,
+                                    "session_id": session.session_id,
+                                })
+                                seen_session_ids.add(session.session_id)
+                                break
+                    except Exception:
+                        continue
 
     return sessions
 

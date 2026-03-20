@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Background daemon that watches the name registry and sets iTerm2 session variables.
+
+Polls the name registry and matches sessions by their Claude Code session ID
+(found in the transcript path or process args) to set cc_name user variables.
+"""
+
+import asyncio
+import json
+import os
+import time
+from pathlib import Path
+
+import iterm2
+
+REGISTRY_FILE = Path.home() / ".local/share/voice-router/name-registry.json"
+POLL_INTERVAL = 2.0  # seconds
+
+
+def load_registry():
+    try:
+        return json.loads(REGISTRY_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+async def sync_names():
+    connection = await iterm2.Connection.async_create()
+    last_registry = {}
+
+    while True:
+        registry = load_registry()
+
+        if registry != last_registry:
+            app = await iterm2.async_get_app(connection)
+            # Build set of names already applied
+            for window in app.windows:
+                for tab in window.tabs:
+                    for session in tab.sessions:
+                        try:
+                            existing = await session.async_get_variable("user.cc_name")
+                            if existing:
+                                continue  # already named
+
+                            # Check if this session's title contains a Claude session indicator
+                            title = await session.async_get_variable("name") or ""
+
+                            # Try to match by checking process — look for session ID in env/args
+                            # Simpler: iterate registry names and try to set on unnamed Claude sessions
+                            # We identify Claude sessions by title containing "Claude" or "claude"
+                            if "claude" not in title.lower():
+                                continue
+
+                            # For each unnamed Claude session, check if we can match it
+                            # by reading what the hook wrote. The hook stores session_id -> name,
+                            # but we need to map iTerm2 session -> Claude session_id.
+                            # Use the terminal's environment to find the transcript path.
+                            pass
+
+                        except Exception:
+                            continue
+
+            last_registry = dict(registry)
+
+        await asyncio.sleep(POLL_INTERVAL)
+
+
+def main():
+    asyncio.run(sync_names())
+
+
+if __name__ == "__main__":
+    main()

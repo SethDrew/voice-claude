@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# auto-name-session — Claude Code Stop hook that generates speakable session names.
+# Uses TERM_SESSION_ID to identify the exact iTerm2 session, then sets cc_name
+# via the iTerm2 Python API.
+
+REGISTRY_DIR="$HOME/.local/share/voice-router"
+REGISTRY_FILE="$REGISTRY_DIR/name-registry.json"
+ROUTER_VENV="$HOME/.local/share/voice-router/venv"
+
+mkdir -p "$REGISTRY_DIR" 2>/dev/null
+[ ! -f "$REGISTRY_FILE" ] && echo '{}' > "$REGISTRY_FILE"
+
+hook_json="$(cat)"
+session_id="$(echo "$hook_json" | jq -r '.session_id // empty' 2>/dev/null)" || true
+transcript_path="$(echo "$hook_json" | jq -r '.transcript_path // empty' 2>/dev/null)" || true
+
+[ -z "$session_id" ] && echo '{"suppressOutput":true}' && exit 0
+
+# Get iTerm2 session ID from environment
+iterm_sid="${TERM_SESSION_ID##*:}"
+[ -z "$iterm_sid" ] && echo '{"suppressOutput":true}' && exit 0
+
+# Already named? Ensure iTerm2 has the variable set and exit.
+existing_name="$(jq -r --arg sid "$session_id" '.[$sid] // empty' "$REGISTRY_FILE" 2>/dev/null)"
+if [ -n "$existing_name" ]; then
+    "$ROUTER_VENV/bin/python3" -c "
+import asyncio, iterm2
+async def main():
+    conn = await iterm2.Connection.async_create()
+    app = await iterm2.async_get_app(conn)
+    for w in app.windows:
+        for t in w.tabs:
+            for s in t.sessions:
+                if s.session_id == '$iterm_sid':
+                    await s.async_set_variable('user.cc_name', '$existing_name')
+                    update = iterm2.LocalWriteOnlyProfile()
+                    update.set_name('$existing_name')
+                    await s.async_set_profile_properties(update)
+                    return
+asyncio.run(main())
+" 2>/dev/null || true
+    echo '{"suppressOutput":true}'
+    exit 0
+fi
+
+[ -z "$transcript_path" ] && echo '{"suppressOutput":true}' && exit 0
+[ ! -f "$transcript_path" ] && echo '{"suppressOutput":true}' && exit 0
+
+# Extract first user message
+first_msg="$(head -c 5000 "$transcript_path" 2>/dev/null | jq -r 'select(.type == "user") | .message.content // empty' 2>/dev/null | head -1)"
+[ -z "$first_msg" ] && echo '{"suppressOutput":true}' && exit 0
+
+# Extract key words
+stopwords='a|an|the|this|that|is|are|was|were|be|been|being|have|has|had|do|does|did|will|would|could|should|can|may|might|shall|must|i|me|my|we|our|you|your|it|its|he|she|they|them|his|her|their|to|of|in|for|on|at|by|with|from|up|out|if|or|and|but|not|no|so|as|just|about|into|than|then|some|any|all|each|every|how|what|when|where|which|who|why|take|look|check|please|help|want|need|tell|make|get|go|see|know|think|come|give|use|find|here|there|very|also|only|really|much|many|like|well|back|even|still|way|thing|right|good|new|now|try|these|those|let|hi|hey|hello|ok|okay|sure|yeah|yes'
+
+words="$(echo "$first_msg" \
+    | tr '[:upper:]' '[:lower:]' \
+    | tr -cs 'a-z0-9' ' ' \
+    | tr -s ' ' \
+    | sed 's/^ //;s/ $//' \
+    | tr ' ' '\n' \
+    | grep -vxE "($stopwords)" 2>/dev/null \
+    | head -2 \
+    | paste -sd'-' - 2>/dev/null)" || true
+
+name="${words:-}"
+
+# Fallback to directory name
+if [ -z "$name" ] || [ "${#name}" -lt 2 ]; then
+    cwd="$(echo "$hook_json" | jq -r '.cwd // empty' 2>/dev/null)"
+    [ -n "$cwd" ] && name="$(basename "$cwd" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//')"
+fi
+
+[ -z "$name" ] && echo '{"suppressOutput":true}' && exit 0
+[ "${#name}" -lt 2 ] && echo '{"suppressOutput":true}' && exit 0
+name="${name:0:30}"
+
+# Deduplicate
+base_name="$name"
+counter=2
+while jq -e --arg name "$name" 'to_entries[] | select(.value == $name)' "$REGISTRY_FILE" >/dev/null 2>&1; do
+    name="${base_name}-${counter}"
+    counter=$((counter + 1))
+    [ $counter -gt 9 ] && break
+done
+
+# Save to registry
+tmp_file="$(mktemp)"
+if jq --arg sid "$session_id" --arg name "$name" '.[$sid] = $name' "$REGISTRY_FILE" > "$tmp_file" 2>/dev/null; then
+    mv "$tmp_file" "$REGISTRY_FILE"
+else
+    rm -f "$tmp_file" 2>/dev/null
+fi
+
+# Set iTerm2 session name via Python API using exact session ID
+"$ROUTER_VENV/bin/python3" -c "
+import asyncio, iterm2
+async def main():
+    conn = await iterm2.Connection.async_create()
+    app = await iterm2.async_get_app(conn)
+    for w in app.windows:
+        for t in w.tabs:
+            for s in t.sessions:
+                if s.session_id == '$iterm_sid':
+                    await s.async_set_variable('user.cc_name', '$name')
+                    update = iterm2.LocalWriteOnlyProfile()
+                    update.set_name('$name')
+                    await s.async_set_profile_properties(update)
+                    return
+asyncio.run(main())
+" 2>/dev/null || true
+
+echo '{"suppressOutput":true}'
+exit 0

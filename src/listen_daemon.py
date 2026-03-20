@@ -19,6 +19,7 @@ import os
 import signal
 import sys
 import tempfile
+import threading
 import time
 import wave
 
@@ -53,6 +54,7 @@ recording = False
 rec_frames = []
 stream = None
 model = None
+seq = 0  # sequence number for each recording
 
 
 def write_state(state, **extra):
@@ -69,11 +71,55 @@ def audio_callback(data, frames, t, status):
         rec_frames.append(data.copy())
 
 
+RESULTS_FILE = os.path.join(STATE_DIR, "daemon-results.jsonl")
+
+
+def transcribe_frames(frames_copy, seq_num):
+    """Transcribe audio in a background thread so signal handlers stay responsive."""
+    write_state("transcribing", seq=seq_num)
+
+    try:
+        data = np.concatenate(frames_copy)
+        if data.ndim > 1:
+            data = data.flatten()
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        with wave.open(tmp.name, "wb") as w:
+            w.setnchannels(CHANNELS)
+            w.setsampwidth(2)
+            w.setframerate(SAMPLE_RATE)
+            w.writeframes((data * 32767).astype(np.int16).tobytes())
+
+        t0 = time.time()
+        if FASTER:
+            segments, info = model.transcribe(tmp.name, language="en", beam_size=5)
+            text = "".join(s.text for s in segments).strip()
+        else:
+            r = model.transcribe(tmp.name, language="en", fp16=False, verbose=False)
+            text = r["text"].strip()
+
+        elapsed = time.time() - t0
+        print(f"[daemon] [{seq_num}] transcribed in {elapsed:.2f}s: {text!r}", flush=True)
+
+        os.unlink(tmp.name)
+
+        # Append to results file (ordered queue for Hammerspoon to consume)
+        with open(RESULTS_FILE, "a") as f:
+            f.write(json.dumps({"seq": seq_num, "text": text}) + "\n")
+
+        write_state("done", text=text, seq=seq_num)
+
+    except Exception as e:
+        write_state("error", error=str(e), seq=seq_num)
+        print(f"[daemon] [{seq_num}] transcription error: {e}", flush=True)
+
+
 def start_recording(signum, frame):
-    global recording, rec_frames, stream
+    global recording, rec_frames, stream, seq
     if recording:
         return
 
+    seq += 1
     rec_frames = []
     recording = True
 
@@ -115,40 +161,11 @@ def stop_recording(signum, frame):
         write_state("done", text="")
         return
 
-    write_state("transcribing")
-
-    try:
-        # Concatenate audio
-        data = np.concatenate(rec_frames)
-        if data.ndim > 1:
-            data = data.flatten()
-
-        # Save to temp wav
-        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        with wave.open(tmp.name, "wb") as w:
-            w.setnchannels(CHANNELS)
-            w.setsampwidth(2)
-            w.setframerate(SAMPLE_RATE)
-            w.writeframes((data * 32767).astype(np.int16).tobytes())
-
-        # Transcribe
-        t0 = time.time()
-        if FASTER:
-            segments, info = model.transcribe(tmp.name, language="en", beam_size=5)
-            text = "".join(s.text for s in segments).strip()
-        else:
-            r = model.transcribe(tmp.name, language="en", fp16=False, verbose=False)
-            text = r["text"].strip()
-
-        elapsed = time.time() - t0
-        print(f"[daemon] transcribed in {elapsed:.2f}s: {text!r}", flush=True)
-
-        os.unlink(tmp.name)
-        write_state("done", text=text)
-
-    except Exception as e:
-        write_state("error", error=str(e))
-        print(f"[daemon] transcription error: {e}", flush=True)
+    # Transcribe in background thread so we can receive new signals immediately
+    frames_copy = list(rec_frames)
+    current_seq = seq
+    rec_frames.clear()
+    threading.Thread(target=transcribe_frames, args=(frames_copy, current_seq), daemon=True).start()
 
 
 def shutdown(signum, frame):
@@ -173,11 +190,9 @@ def main():
 
     os.makedirs(STATE_DIR, exist_ok=True)
 
-    # Write PID
     with open(PID_FILE, "w") as f:
         f.write(str(os.getpid()))
 
-    # Load model (the slow part — only happens once)
     print(f"[daemon] loading whisper model '{MODEL_NAME}'...", flush=True)
     t0 = time.time()
     if FASTER:
@@ -187,7 +202,6 @@ def main():
         model = whisper.load_model(MODEL_NAME)
         print(f"[daemon] whisper loaded in {time.time()-t0:.2f}s", flush=True)
 
-    # Register signals
     signal.signal(signal.SIGUSR1, start_recording)
     signal.signal(signal.SIGUSR2, stop_recording)
     signal.signal(signal.SIGTERM, shutdown)
@@ -196,7 +210,6 @@ def main():
     write_state("idle")
     print(f"[daemon] ready (pid={os.getpid()})", flush=True)
 
-    # Sleep forever, signals do the work
     while True:
         signal.pause()
 

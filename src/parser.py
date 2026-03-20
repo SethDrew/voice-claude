@@ -62,21 +62,30 @@ def parse(raw: str) -> ParsedCommand:
     # Apply slash command substitution
     text = replace_slash_commands(text)
 
-    # "go to <target>"
-    m = re.match(r'^go\s+to\s+(\S+)\s*$', text, re.IGNORECASE)
+    # "go to <target>" / "switch to <target>" / "focus <target>"
+    m = re.match(r'^(?:go\s+to|switch\s+to|focus)\s+(\S+)\s*$', text, re.IGNORECASE)
     if m:
         return ParsedCommand(target=m.group(1).lower(), text=None)
 
-    # "tell <target>: <text>"
-    m = re.match(r'^tell\s+(\S+)\s*:\s*(.+)$', text, re.IGNORECASE)
+    # "<verb> <target>: <text>" with colon
+    verbs = r'(?:tell|ask|send|message|ping|talk\s+to|hey|yo)'
+    m = re.match(rf'^{verbs}\s+(\S+)\s*:\s*(.+)$', text, re.IGNORECASE)
     if m:
         return ParsedCommand(
             target=m.group(1).lower(),
             text=replace_slash_commands(m.group(2).strip()),
         )
 
-    # "tell <target> <text>" (no colon — first word after tell is target)
-    m = re.match(r'^tell\s+(\S+)\s+(.+)$', text, re.IGNORECASE)
+    # "<verb> <target> <text>" without colon
+    m = re.match(rf'^{verbs}\s+(\S+)\s+(.+)$', text, re.IGNORECASE)
+    if m:
+        return ParsedCommand(
+            target=m.group(1).lower(),
+            text=replace_slash_commands(m.group(2).strip()),
+        )
+
+    # "in <target>, <text>" / "on <target>, <text>"
+    m = re.match(r'^(?:in|on)\s+(\S+)\s*[,:]?\s+(.+)$', text, re.IGNORECASE)
     if m:
         return ParsedCommand(
             target=m.group(1).lower(),

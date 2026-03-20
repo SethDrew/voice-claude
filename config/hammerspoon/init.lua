@@ -2,12 +2,16 @@
 -- voice-router hotkey — press Right Option to record, release to stop
 -- Uses warm listen daemon for instant mic activation
 local voiceRouter = {}
-voiceRouter.active = false
 voiceRouter.optDown = false
 voiceRouter.stateFile = os.getenv("HOME") .. "/.local/share/voice-router/daemon-state.json"
+voiceRouter.resultsFile = os.getenv("HOME") .. "/.local/share/voice-router/daemon-results.jsonl"
 voiceRouter.pidFile = os.getenv("HOME") .. "/.local/share/voice-router/listen-daemon.pid"
 voiceRouter.pollTimer = nil
-voiceRouter.alertId = nil
+voiceRouter.routeQueue = {}
+voiceRouter.routing = false
+voiceRouter.lastResultLine = 0
+voiceRouter.pendingCount = 0  -- how many recordings are still being transcribed
+voiceRouter.micAlert = nil
 
 local function getDaemonPid()
     local f = io.open(voiceRouter.pidFile, "r")
@@ -18,30 +22,24 @@ local function getDaemonPid()
     return nil
 end
 
-local function readState()
-    local f = io.open(voiceRouter.stateFile, "r")
-    if not f then return nil end
-    local raw = f:read("*a")
-    f:close()
-    local ok, data = pcall(hs.json.decode, raw)
-    if ok then return data end
-    return nil
-end
-
 local function signalDaemon(sig)
     local pid = getDaemonPid()
     if pid then
         hs.execute("kill -" .. sig .. " " .. pid)
         return true
-    else
-        hs.alert.show("✗ Listen daemon not running\nRun: voice-listen-daemon", nil, nil, 3)
-        return false
     end
+    return false
 end
 
-local function routeText(text)
+local function processQueue()
+    if voiceRouter.routing or #voiceRouter.routeQueue == 0 then return end
+
+    voiceRouter.routing = true
+    local text = table.remove(voiceRouter.routeQueue, 1)
+
     if not text or #text == 0 then
-        hs.alert.show("(no speech detected)", nil, nil, 1.5)
+        voiceRouter.routing = false
+        processQueue()
         return
     end
 
@@ -53,11 +51,8 @@ local function routeText(text)
     local task = hs.task.new(
         os.getenv("HOME") .. "/.local/bin/voice-route",
         function(exitCode, stdout, stderr)
-            if exitCode == 0 and stdout and #stdout > 0 then
-                hs.alert.show("✓ " .. stdout:sub(1, 80), nil, nil, 2)
-            else
-                hs.alert.show("✗ Route failed", nil, nil, 2)
-            end
+            voiceRouter.routing = false
+            processQueue()
         end,
         {"--text", text}
     )
@@ -65,71 +60,69 @@ local function routeText(text)
     task:start()
 end
 
-local function pollForResult()
-    -- Poll daemon state until transcription is done
-    if voiceRouter.pollTimer then voiceRouter.pollTimer:stop() end
-    voiceRouter.pollTimer = hs.timer.doEvery(0.1, function()
-        local state = readState()
-        if not state then return end
+local function consumeResults()
+    local f = io.open(voiceRouter.resultsFile, "r")
+    if not f then return end
 
-        if state.state == "done" then
+    local lineNum = 0
+    for line in f:lines() do
+        lineNum = lineNum + 1
+        if lineNum > voiceRouter.lastResultLine then
+            local ok, result = pcall(hs.json.decode, line)
+            if ok and result and result.text and #result.text > 0 then
+                table.insert(voiceRouter.routeQueue, result.text)
+                voiceRouter.pendingCount = math.max(0, voiceRouter.pendingCount - 1)
+            elseif ok then
+                -- empty transcription, still decrement pending
+                voiceRouter.pendingCount = math.max(0, voiceRouter.pendingCount - 1)
+            end
+            voiceRouter.lastResultLine = lineNum
+        end
+    end
+    f:close()
+
+    processQueue()
+end
+
+local function ensurePolling()
+    if voiceRouter.pollTimer then return end
+    voiceRouter.pollTimer = hs.timer.doEvery(0.15, function()
+        consumeResults()
+
+        -- Stop when nothing pending and queue drained
+        if voiceRouter.pendingCount <= 0 and #voiceRouter.routeQueue == 0
+           and not voiceRouter.routing and not voiceRouter.optDown then
             voiceRouter.pollTimer:stop()
             voiceRouter.pollTimer = nil
-            voiceRouter.active = false
-            routeText(state.text)
-        elseif state.state == "error" then
-            voiceRouter.pollTimer:stop()
-            voiceRouter.pollTimer = nil
-            voiceRouter.active = false
-            hs.alert.show("✗ " .. (state.error or "unknown error"), nil, nil, 2)
         end
     end)
 end
 
 voiceRouter.tap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, function(event)
     local flags = event:getRawEventData().CGEventData.flags
-    local optPressed = (flags & 0x80000) ~= 0
+    local rightOpt = (flags & 0x40) ~= 0 and (flags & 0x20) == 0
     local ctrlPressed = (flags & 0x40000) ~= 0
     local cmdPressed = (flags & 0x100000) ~= 0
     local shiftPressed = (flags & 0x20000) ~= 0
 
-    local optOnly = optPressed and not ctrlPressed and not cmdPressed and not shiftPressed
+    local optOnly = rightOpt and not ctrlPressed and not cmdPressed and not shiftPressed
 
     if optOnly and not voiceRouter.optDown then
-        -- Option pressed — start recording immediately
         voiceRouter.optDown = true
-
-        if not voiceRouter.active then
-            voiceRouter.active = true
-            if signalDaemon("USR1") then
-                -- Poll until state becomes "recording" to show alert
-                local checkTimer
-                checkTimer = hs.timer.doEvery(0.02, function()
-                    local state = readState()
-                    if state and state.state == "recording" then
-                        checkTimer:stop()
-                        hs.alert.show("🎤 Listening...", nil, nil, 10)
-                    end
-                end)
-                -- Safety: stop polling after 2s
-                hs.timer.doAfter(2, function() checkTimer:stop() end)
-            end
-        end
-
-    elseif not optPressed and voiceRouter.optDown then
-        -- Option released — stop recording, begin transcription
-        voiceRouter.optDown = false
+        signalDaemon("USR1")
+        -- Show mic indicator (stays until we close it on release)
         hs.alert.closeAll()
+        voiceRouter.micAlert = hs.alert.show("🎤", nil, nil, 60)
 
-        if voiceRouter.active then
-            signalDaemon("USR2")
-            hs.alert.show("⏳ Transcribing...", nil, nil, 10)
-            pollForResult()
-        end
+    elseif not rightOpt and voiceRouter.optDown then
+        voiceRouter.optDown = false
+        signalDaemon("USR2")
+        hs.alert.closeAll()
+        voiceRouter.pendingCount = voiceRouter.pendingCount + 1
+        ensurePolling()
     end
 
     return false
 end)
 
 voiceRouter.tap:start()
-print("[voice-router] loaded — press Option to record")

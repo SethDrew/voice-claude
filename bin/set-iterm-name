@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Set iTerm2 session name and cc_name user variable for the current session.
+# Usage: set-iterm-name <name>
+# Uses iTerm2 proprietary escape sequences — must be run from within iTerm2.
+NAME="$1"
+[ -z "$NAME" ] && exit 0
+
+# OSC 1337 for iTerm2 user variable (processed by iTerm2 even inside TUI apps)
+printf '\033]1337;SetUserVar=cc_name=%s\007' "$(echo -n "$NAME" | base64)" > /dev/tty 2>/dev/null || true
+
+# Also try OSC 0 for tab title
+printf '\033]0;%s\007' "$NAME" > /dev/tty 2>/dev/null || true
