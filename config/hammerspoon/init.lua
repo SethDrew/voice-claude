@@ -1,7 +1,7 @@
 
--- voice-router hotkey — two-press flow:
+-- voice-router hotkey — two-press flow with live transcription overlay:
 --   Press 1: say target name → shows "→ firmware" overlay
---   Press 2: say command → routes to confirmed target
+--   Press 2: say command → live text appears in overlay, routes on release
 -- Uses warm listen daemon for instant mic activation
 
 local voiceRouter = {}
@@ -20,9 +20,12 @@ voiceRouter.lastChunkLine = 0
 voiceRouter.chunkTimer = nil
 
 -- Two-press state
-voiceRouter.pendingTarget = nil      -- confirmed target from first press
-voiceRouter.targetTimeout = nil      -- timer to clear pending target
-voiceRouter.targetOverlay = nil      -- canvas showing target name
+voiceRouter.pendingTarget = nil
+voiceRouter.targetOverlay = nil
+
+-- Live transcription state
+voiceRouter.liveOverlay = nil
+voiceRouter.liveText = ""  -- accumulated chunk text during recording
 
 -- Icon overlay for recording indicator
 local iconPath = os.getenv("HOME") .. "/Documents/projects/voice-claude/icon.png"
@@ -70,7 +73,6 @@ local function hideMicIndicator()
 end
 
 local function showTargetOverlay(targetName)
-    -- Clear any existing target overlay
     if voiceRouter.targetOverlay then
         voiceRouter.targetOverlay:delete()
         voiceRouter.targetOverlay = nil
@@ -83,7 +85,7 @@ local function showTargetOverlay(targetName)
 
     voiceRouter.targetOverlay = hs.canvas.new({
         x = frame.x + frame.w / 2 - width / 2,
-        y = frame.y + frame.h / 2 + 60,  -- below the mic icon
+        y = frame.y + frame.h / 2 + 60,
         w = width,
         h = height,
     })
@@ -117,13 +119,67 @@ local function hideTargetOverlay()
     end
 end
 
+local function updateLiveOverlay(text)
+    -- Show live transcription text below the mic icon
+    if voiceRouter.liveOverlay then
+        voiceRouter.liveOverlay:delete()
+        voiceRouter.liveOverlay = nil
+    end
+
+    if not text or #text == 0 then return end
+
+    local screen = hs.screen.mainScreen()
+    local frame = screen:fullFrame()
+    local width = 600
+    -- Auto-height based on text length
+    local lines = math.ceil(#text / 50) + 1
+    local height = math.max(50, lines * 28)
+
+    voiceRouter.liveOverlay = hs.canvas.new({
+        x = frame.x + frame.w / 2 - width / 2,
+        y = frame.y + frame.h / 2 + 60,
+        w = width,
+        h = height,
+    })
+
+    -- Show target prefix if we have one
+    local displayText = text
+    if voiceRouter.pendingTarget then
+        displayText = "→ " .. voiceRouter.pendingTarget .. "\n" .. text
+    end
+
+    voiceRouter.liveOverlay:appendElements(
+        {
+            type = "rectangle",
+            action = "fill",
+            fillColor = { red = 0.05, green = 0.05, blue = 0.1, alpha = 0.9 },
+            roundedRectRadii = { xRadius = 10, yRadius = 10 },
+        },
+        {
+            type = "text",
+            text = displayText,
+            textColor = { red = 0.8, green = 0.85, blue = 0.9, alpha = 0.9 },
+            textSize = 18,
+            textAlignment = "left",
+            frame = { x = "4%", y = "8%", w = "92%", h = "84%" },
+        }
+    )
+    voiceRouter.liveOverlay:level(hs.canvas.windowLevels.overlay)
+    voiceRouter.liveOverlay:behavior(hs.canvas.windowBehaviors.canJoinAllSpaces
+        + hs.canvas.windowBehaviors.stationary)
+    voiceRouter.liveOverlay:show()
+end
+
+local function hideLiveOverlay()
+    if voiceRouter.liveOverlay then
+        voiceRouter.liveOverlay:delete()
+        voiceRouter.liveOverlay = nil
+    end
+end
+
 local function clearPendingTarget()
     voiceRouter.pendingTarget = nil
     hideTargetOverlay()
-    if voiceRouter.targetTimeout then
-        voiceRouter.targetTimeout:stop()
-        voiceRouter.targetTimeout = nil
-    end
 end
 
 local function getDaemonPid()
@@ -147,7 +203,6 @@ local function signalDaemon(sig)
 end
 
 local function resolveTarget(text)
-    -- Call voice-route --resolve to get the target without routing
     local env = {
         PATH = os.getenv("HOME") .. "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         HOME = os.getenv("HOME"),
@@ -164,13 +219,8 @@ local function resolveTarget(text)
             if target and #target > 0 then
                 voiceRouter.pendingTarget = target
                 showTargetOverlay(target)
-
-                -- Show overlay for 3 seconds then hide (target stays sticky in memory)
-                hs.timer.doAfter(3, function()
-                    hideTargetOverlay()
-                end)
+                hs.timer.doAfter(3, function() hideTargetOverlay() end)
             else
-                -- Couldn't resolve — show error briefly
                 hs.alert.show("? no session found", nil, nil, 1.5)
             end
         end,
@@ -186,7 +236,7 @@ local function routeToTarget(target, text)
         HOME = os.getenv("HOME"),
     }
 
-    -- Hide the overlay once we start routing (target stays sticky in memory)
+    hideLiveOverlay()
     hideTargetOverlay()
 
     local task = hs.task.new(
@@ -210,7 +260,6 @@ local function classifyText(text, stickyTarget)
         os.getenv("HOME") .. "/.local/bin/voice-route",
         function(exitCode, stdout, stderr)
             if exitCode ~= 0 or not stdout then
-                -- Classification failed — send as content to sticky target
                 routeToTarget(voiceRouter.pendingTarget, text)
                 return
             end
@@ -222,20 +271,16 @@ local function classifyText(text, stickyTarget)
             end
 
             if result.action == "switch" and result.target then
-                -- Switch to new target
                 clearPendingTarget()
                 voiceRouter.pendingTarget = result.target
                 showTargetOverlay(result.target)
                 hs.timer.doAfter(3, function() hideTargetOverlay() end)
-                -- Send the command text if present
                 if result.text and #result.text > 0 then
                     routeToTarget(result.target, result.text)
                 end
             elseif result.action == "self" and result.text then
-                -- Self-routing: strip prefix, send content
                 routeToTarget(voiceRouter.pendingTarget, result.text)
             else
-                -- Content: send full text to sticky target
                 routeToTarget(voiceRouter.pendingTarget, text)
             end
         end,
@@ -257,7 +302,7 @@ local function processQueue()
         return
     end
 
-    -- Tier 1: Fast-path for unambiguous focus verbs (0ms, in Lua)
+    -- Tier 1: Fast-path for unambiguous focus verbs
     local lower = text:lower()
     if lower:match("^go%s+to%s") or lower:match("^switch%s+to%s") or lower:match("^focus%s") then
         voiceRouter.routing = false
@@ -267,10 +312,8 @@ local function processQueue()
     end
 
     if voiceRouter.pendingTarget then
-        -- Tier 2: Ask the parser to classify (Python, ~20-50ms)
         classifyText(text, voiceRouter.pendingTarget)
     else
-        -- No target — resolve
         voiceRouter.routing = false
         resolveTarget(text)
     end
@@ -299,37 +342,8 @@ local function consumeResults()
     processQueue()
 end
 
-local function sendChunkToTarget(target, text, isFinal)
-    -- Send a transcribed chunk to the target session via voice-route CLI
-    local env = {
-        PATH = os.getenv("HOME") .. "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        HOME = os.getenv("HOME"),
-    }
-
-    local args
-    if isFinal then
-        -- Final chunk: send with newline (submits the command)
-        args = {"--target", target, "--text", text}
-    else
-        -- Non-final chunk: send without newline (streaming append)
-        args = {"--target", target, "--text", text, "--no-newline"}
-    end
-
-    local task = hs.task.new(
-        os.getenv("HOME") .. "/.local/bin/voice-route",
-        function(exitCode, stdout, stderr)
-            -- chunk sent
-        end,
-        args
-    )
-    task:setEnvironment(env)
-    task:start()
-end
-
+-- Live transcription: show chunks in overlay as they arrive
 local function consumeChunks()
-    -- Poll daemon-chunks.jsonl for new streaming chunks during recording
-    if not voiceRouter.pendingTarget then return end
-
     local f = io.open(voiceRouter.chunksFile, "r")
     if not f then return end
 
@@ -339,7 +353,13 @@ local function consumeChunks()
         if lineNum > voiceRouter.lastChunkLine then
             local ok, chunk = pcall(hs.json.decode, line)
             if ok and chunk and chunk.text and #chunk.text > 0 then
-                sendChunkToTarget(voiceRouter.pendingTarget, chunk.text, chunk.final or false)
+                -- Append chunk text to live display
+                if #voiceRouter.liveText > 0 then
+                    voiceRouter.liveText = voiceRouter.liveText .. " " .. chunk.text
+                else
+                    voiceRouter.liveText = chunk.text
+                end
+                updateLiveOverlay(voiceRouter.liveText)
             end
             voiceRouter.lastChunkLine = lineNum
         end
@@ -350,10 +370,10 @@ end
 local function startChunkPolling()
     if voiceRouter.chunkTimer then return end
     voiceRouter.lastChunkLine = 0
+    voiceRouter.liveText = ""
     voiceRouter.chunkTimer = hs.timer.doEvery(0.15, function()
         consumeChunks()
 
-        -- Stop chunk polling when recording ends
         if not voiceRouter.optDown then
             if voiceRouter.chunkTimer then
                 voiceRouter.chunkTimer:stop()
@@ -392,15 +412,18 @@ voiceRouter.tap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, functi
         voiceRouter.optDown = true
         signalDaemon("USR1")
         showMicIndicator()
-        -- Start chunk polling if we have a sticky target (streaming mode)
-        if voiceRouter.pendingTarget then
-            startChunkPolling()
-        end
+        -- Start live transcription polling
+        startChunkPolling()
 
     elseif not rightOpt and voiceRouter.optDown then
         voiceRouter.optDown = false
         signalDaemon("USR2")
         hideMicIndicator()
+        -- Hide live overlay after a brief delay (let final chunk arrive)
+        hs.timer.doAfter(1.5, function()
+            hideLiveOverlay()
+        end)
+        voiceRouter.liveText = ""
         voiceRouter.pendingCount = voiceRouter.pendingCount + 1
         ensurePolling()
     end
