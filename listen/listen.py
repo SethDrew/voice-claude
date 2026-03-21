@@ -618,7 +618,7 @@ def process_recording(lang, mdl, sig_mode, codevoice):
         log('Signal mode enabled: listening for SIGUSR1')
 
         # Write PID file for external tools (Hammerspoon) to signal us
-        pid_file = os.path.expanduser("~/.local/share/voice-router/listen.pid")
+        pid_file = os.path.expanduser("~/.local/share/voice-claude/listen.pid")
         try:
             os.makedirs(os.path.dirname(pid_file), exist_ok=True)
             with open(pid_file, 'w') as f:

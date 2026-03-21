@@ -1,5 +1,5 @@
 #!/bin/bash
-# STT launcher — activates listen venv and runs listen.py
-LISTEN_DIR="$HOME/.local/share/listen"
-source "$LISTEN_DIR/venv/bin/activate"
-exec python "$LISTEN_DIR/listen.py" "$@"
+# STT launcher — activates venv and runs listen.py
+INSTALL_DIR="$HOME/.local/share/voice-claude"
+source "$INSTALL_DIR/venv/bin/activate"
+exec python "$INSTALL_DIR/listen.py" "$@"

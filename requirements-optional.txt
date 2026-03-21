@@ -1,0 +1,6 @@
+# Optional: LLM-based voice routing (recommended)
+mlx-lm>=0.20.0
+
+# Optional: fallback STT for non-Apple-Silicon
+faster-whisper>=1.0.0
+openai-whisper>=20230314

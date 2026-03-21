@@ -6,9 +6,9 @@
 
 local voiceRouter = {}
 voiceRouter.optDown = false
-voiceRouter.stateFile = os.getenv("HOME") .. "/.local/share/voice-router/daemon-state.json"
-voiceRouter.resultsFile = os.getenv("HOME") .. "/.local/share/voice-router/daemon-results.jsonl"
-voiceRouter.pidFile = os.getenv("HOME") .. "/.local/share/voice-router/listen-daemon.pid"
+voiceRouter.stateFile = os.getenv("HOME") .. "/.local/share/voice-claude/daemon-state.json"
+voiceRouter.resultsFile = os.getenv("HOME") .. "/.local/share/voice-claude/daemon-results.jsonl"
+voiceRouter.pidFile = os.getenv("HOME") .. "/.local/share/voice-claude/listen-daemon.pid"
 voiceRouter.pollTimer = nil
 voiceRouter.routeQueue = {}
 voiceRouter.routing = false

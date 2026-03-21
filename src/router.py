@@ -11,7 +11,7 @@ from typing import Optional
 import iterm2
 from rapidfuzz import fuzz
 
-STATE_DIR = Path.home() / ".local" / "share" / "voice-router"
+STATE_DIR = Path.home() / ".local" / "share" / "voice-claude"
 STATE_FILE = STATE_DIR / "state.json"
 NAME_REGISTRY_FILE = STATE_DIR / "name-registry.json"
 

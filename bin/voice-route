@@ -1,5 +1,4 @@
 #!/bin/bash
-# Voice router CLI launcher
-ROUTER_DIR="$HOME/.local/share/voice-router"
-source "$ROUTER_DIR/venv/bin/activate"
-PYTHONPATH="$ROUTER_DIR" exec python -m main "$@"
+INSTALL_DIR="$HOME/.local/share/voice-claude"
+source "$INSTALL_DIR/venv/bin/activate"
+PYTHONPATH="$INSTALL_DIR" exec python -m main "$@"

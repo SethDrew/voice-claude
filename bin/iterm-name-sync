@@ -13,7 +13,7 @@ from pathlib import Path
 
 import iterm2
 
-REGISTRY_FILE = Path.home() / ".local/share/voice-router/name-registry.json"
+REGISTRY_FILE = Path.home() / ".local/share/voice-claude/name-registry.json"
 POLL_INTERVAL = 2.0  # seconds
 
 

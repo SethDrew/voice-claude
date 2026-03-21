@@ -10,7 +10,7 @@ Signal handlers are minimal (write a byte to a pipe). All real work
 runs in the main loop, avoiding signal-handler reentrancy issues with
 MLX's Metal GPU threads.
 
-State written to ~/.local/share/voice-router/daemon-state.json:
+State written to ~/.local/share/voice-claude/daemon-state.json:
   {"state": "idle"}
   {"state": "recording"}
   {"state": "transcribing"}
@@ -31,9 +31,7 @@ import wave
 import numpy as np
 import sounddevice as sd
 
-# Add listen dir to path for config
-listen_dir = os.path.expanduser("~/.local/share/listen")
-sys.path.insert(0, listen_dir)
+# Config is in the same install dir (PYTHONPATH includes it)
 import config
 
 # Three-tier import: mlx_whisper > faster_whisper > openai-whisper
@@ -50,7 +48,7 @@ except ImportError:
         BACKEND = "openai"
 
 # Paths
-STATE_DIR = os.path.expanduser("~/.local/share/voice-router")
+STATE_DIR = os.path.expanduser("~/.local/share/voice-claude")
 STATE_FILE = os.path.join(STATE_DIR, "daemon-state.json")
 PID_FILE = os.path.join(STATE_DIR, "listen-daemon.pid")
 RESULTS_FILE = os.path.join(STATE_DIR, "daemon-results.jsonl")
@@ -249,7 +247,7 @@ def main():
     print(f"[daemon] loading whisper model '{model_name}' (backend={BACKEND})...", flush=True)
     t0 = time.time()
     if BACKEND == "mlx":
-        warmup_file = os.path.join(tempfile.gettempdir(), "voice-router-warmup.wav")
+        warmup_file = os.path.join(tempfile.gettempdir(), "voice-claude-warmup.wav")
         with wave.open(warmup_file, "wb") as w:
             w.setnchannels(CHANNELS)
             w.setsampwidth(2)

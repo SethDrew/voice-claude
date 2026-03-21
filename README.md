@@ -1,13 +1,13 @@
-# Voice Router for Claude Code
+# Voice Claude
 
 Route voice commands to named Claude Code sessions running in iTerm2 tabs. Hold a key, speak a command, release — your words land in the right session.
 
 ## Architecture
 
 ```
-[Push-to-Talk Hotkey]  --or--  [CLI]  --or--  [Phone HTTP POST]
-        |                        |                    |
-        v                        v                    v
+[Push-to-Talk Hotkey]  --or--  [CLI]
+        |                        |
+        v                        v
   +--------------------------------------------------------------+
   |              Speech-to-Text (MLX Whisper)                     |
   |  large-v3-turbo on Apple Silicon, coding vocabulary primed   |
@@ -82,16 +82,6 @@ voice-route --text "tell firmware: check GPIO"
 voice-route --list
 ```
 
-### 3. Phone Server
-
-```bash
-voice-phone-server  # starts on port 7890
-
-curl -X POST http://<your-ip>:7890/voice \
-  -H 'Content-Type: application/json' \
-  -d '{"text": "tell firmware: check GPIO"}'
-```
-
 ## Command Grammar
 
 The parser supports multiple natural patterns. You don't need to memorize a specific syntax:
@@ -132,14 +122,14 @@ cc firmware       # sets cc_name=firmware via the cc wrapper
 claude -n spark   # Claude Code's built-in --name flag
 ```
 
-**iTerm2 setup for tab titles:** Go to iTerm2 → Settings → Profiles → General → Title and ensure "Session Name" is included in the title format.
+**iTerm2 setup for tab titles:** Go to iTerm2 -> Settings -> Profiles -> General -> Title and ensure "Session Name" is included in the title format.
 
 ## Requirements
 
 ### Required
 
 - **macOS with Apple Silicon** (M1/M2/M3/M4/M5 — needed for MLX Whisper GPU acceleration)
-- **iTerm2** with Python API enabled (Settings → General → Magic → Enable Python API)
+- **iTerm2** with Python API enabled (Settings -> General -> Magic -> Enable Python API)
 - **Python 3.10+** (recommend 3.13 via `brew install python@3.13`)
 - **Homebrew** (for portaudio, ffmpeg)
 - **ffmpeg** (`brew install ffmpeg` — Whisper needs it for audio decoding)
@@ -147,18 +137,10 @@ claude -n spark   # Claude Code's built-in --name flag
 - **Hammerspoon** (`brew install --cask hammerspoon` — for push-to-talk hotkey)
 - **Microphone access** granted to iTerm2
 
-### Optional (Enhanced Routing)
+### Optional
 
-- **[Ollama](https://ollama.com/)** — Enables LLM-based intent parsing for natural voice commands that don't match standard patterns. When installed, the parser falls back to a local LLM if regex doesn't match.
-
-```bash
-brew install ollama
-ollama pull qwen2.5:1.5b
-# Start Ollama server (runs in background)
-brew services start ollama
-```
-
-With Ollama, you can say things like "the firmware session should check the GPIO pins" or "can you have spark look at the error logs" — natural speech that regex can't parse.
+- **mlx-lm** — Local LLM-based intent parsing for natural voice commands that don't match standard patterns. setup.sh will prompt to install it.
+- **faster-whisper** / **openai-whisper** — Fallback STT for non-Apple-Silicon Macs. See `requirements-optional.txt`.
 
 ### Non-Apple-Silicon Macs
 
@@ -171,31 +153,26 @@ src/
   main.py              # CLI entry point (voice-route)
   router.py            # iTerm2 session discovery + fuzzy routing
   parser.py            # Command parsing (regex + rapidfuzz + LLM fallback)
-  llm_router.py        # Optional Ollama-based intent parsing
+  llm_router.py        # Optional MLX-LM-based intent parsing
   listen_daemon.py     # Warm listen daemon (MLX Whisper large-v3-turbo)
-  daemon.py            # Wake word detection daemon
-  phone_server.py      # Flask REST API
 listen/
-  listen.py            # Standalone STT with waveform meter
+  listen.py            # Standalone STT with waveform meter (--hotkey CLI mode)
   config.py            # Audio/model configuration
 bin/
   cc                   # Named session launcher
   voice-route          # CLI entry point
-  voice-listen-daemon  # Warm daemon launcher
+  voice-listen-daemon  # Warm daemon launcher (auto-restart)
   auto-name-session    # Claude Code Stop hook for session naming
-  voice-daemon         # Wake word daemon launcher
-  voice-phone-server   # Phone server launcher
 config/
   hammerspoon/         # Push-to-talk hotkey config (Right Option key)
   launchd/             # Auto-start plist template
 ```
 
-After install:
+After install (single unified directory):
 ```
-~/.local/share/voice-router/    # Runtime: router modules + venv + daemon state
-~/.local/share/listen/          # STT: Whisper models + venv
-~/.local/bin/                   # Launcher scripts (on PATH)
-~/.hammerspoon/init.lua         # Hotkey config (appended by setup.sh)
+~/.local/share/voice-claude/     # Runtime: all modules + venv + daemon state
+~/.local/bin/                    # Launcher scripts (on PATH)
+~/.hammerspoon/init.lua          # Hotkey config (appended by setup.sh)
 ```
 
 ## Claude Code Settings
@@ -225,12 +202,6 @@ The auto-naming hook requires these settings in `~/.claude/settings.json`:
 ```
 
 `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` prevents Claude from overwriting the auto-generated session name on each response. The hook timeout of 20s gives `claude -p` enough time to generate a name.
-
-## Future Work
-
-- **Wake word detection**: Always-listening mode using OpenWakeWord with custom ONNX models. Infrastructure exists in `src/daemon.py` — needs trained `.onnx` models.
-- **Process supervision**: launchd plist for auto-starting the listen daemon on login.
-- **`voice-route --doctor`**: Diagnostic command to check all prerequisites and configuration.
 
 ## License
 

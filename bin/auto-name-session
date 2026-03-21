@@ -3,9 +3,9 @@
 # Uses TERM_SESSION_ID to identify the exact iTerm2 session, then sets cc_name
 # via the iTerm2 Python API.
 
-REGISTRY_DIR="$HOME/.local/share/voice-router"
+REGISTRY_DIR="$HOME/.local/share/voice-claude"
 REGISTRY_FILE="$REGISTRY_DIR/name-registry.json"
-ROUTER_VENV="$HOME/.local/share/voice-router/venv"
+ROUTER_VENV="$HOME/.local/share/voice-claude/venv"
 
 mkdir -p "$REGISTRY_DIR" 2>/dev/null
 [ ! -f "$REGISTRY_FILE" ] && echo '{}' > "$REGISTRY_FILE"

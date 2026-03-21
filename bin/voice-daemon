@@ -1,5 +1,0 @@
-#!/bin/bash
-# Wake word daemon launcher
-ROUTER_DIR="$HOME/.local/share/voice-router"
-source "$ROUTER_DIR/venv/bin/activate"
-PYTHONPATH="$ROUTER_DIR" exec python -m daemon "$@"

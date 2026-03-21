@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-LISTEN_VENV="$HOME/.local/share/listen/venv"
+LISTEN_VENV="$HOME/.local/share/voice-claude/venv"
 
 if [ ! -f "$LISTEN_VENV/bin/python" ]; then
     echo "Error: Listen venv not found at $LISTEN_VENV"

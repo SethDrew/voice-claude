@@ -2,8 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROUTER_INSTALL="$HOME/.local/share/voice-router"
-LISTEN_INSTALL="$HOME/.local/share/listen"
+INSTALL_DIR="$HOME/.local/share/voice-claude"
 BIN_DIR="$HOME/.local/bin"
 
 RED='\033[0;31m'
@@ -15,7 +14,7 @@ info()  { echo -e "${GRN}[✓]${RST} $*"; }
 warn()  { echo -e "${YEL}[!]${RST} $*"; }
 error() { echo -e "${RED}[✗]${RST} $*"; exit 1; }
 
-echo "=== Voice Router Setup ==="
+echo "=== Voice Claude Setup ==="
 echo ""
 
 # --- Prerequisites ---
@@ -40,6 +39,13 @@ if ! brew list portaudio >/dev/null 2>&1; then
 fi
 info "portaudio"
 
+# ffmpeg
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    warn "Installing ffmpeg (required by Whisper for audio decoding)..."
+    brew install ffmpeg
+fi
+info "ffmpeg"
+
 # iTerm2
 if [[ -d "/Applications/iTerm.app" ]]; then
     info "iTerm2"
@@ -56,74 +62,49 @@ fi
 
 echo ""
 
-# --- Voice Router venv ---
-info "Setting up voice-router environment..."
-mkdir -p "$ROUTER_INSTALL"
+# --- Single unified venv ---
+info "Setting up voice-claude environment..."
+mkdir -p "$INSTALL_DIR"
 
-if [[ ! -d "$ROUTER_INSTALL/venv" ]]; then
-    python3 -m venv "$ROUTER_INSTALL/venv"
-    info "Created voice-router venv"
+if [[ ! -d "$INSTALL_DIR/venv" ]]; then
+    python3 -m venv "$INSTALL_DIR/venv"
+    info "Created venv"
 else
-    info "Voice-router venv exists"
+    info "Venv exists"
 fi
-source "$ROUTER_INSTALL/venv/bin/activate"
-pip install -q -r "$SCRIPT_DIR/requirements.txt"
-deactivate
-info "Voice-router dependencies installed"
+source "$INSTALL_DIR/venv/bin/activate"
 
-# --- Listen venv ---
-info "Setting up listen environment..."
-mkdir -p "$LISTEN_INSTALL"
-
-if [[ ! -d "$LISTEN_INSTALL/venv" ]]; then
-    python3 -m venv "$LISTEN_INSTALL/venv"
-    info "Created listen venv"
-else
-    info "Listen venv exists"
-fi
-source "$LISTEN_INSTALL/venv/bin/activate"
-
-# Apple Silicon detection for MLX Whisper
+# Apple Silicon detection for MLX
 ARCH=$(uname -m)
 if [[ "$ARCH" == "arm64" ]]; then
-    info "Apple Silicon detected — installing mlx-whisper for accelerated transcription"
-    pip install -q mlx-whisper>=0.4.0 || warn "mlx-whisper install failed (optional — will fall back to faster-whisper)"
+    info "Apple Silicon detected — MLX Whisper will be installed"
 fi
 
-pip install -q -r "$SCRIPT_DIR/requirements-listen.txt"
+pip install -q -r "$SCRIPT_DIR/requirements.txt"
+info "Core dependencies installed"
+
+# Optional: mlx-lm for LLM-based voice routing
+if [[ "$ARCH" == "arm64" ]]; then
+    echo ""
+    read -p "Install mlx-lm for LLM-based voice routing? (recommended, ~200MB) [y/N] " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        pip install -q "mlx-lm>=0.20.0" || warn "mlx-lm install failed (optional)"
+        info "mlx-lm installed"
+    else
+        info "Skipped mlx-lm (can install later: pip install mlx-lm)"
+    fi
+fi
+
 deactivate
-info "Listen dependencies installed"
-
-# --- Optional: Ollama check ---
-echo ""
-if command -v ollama >/dev/null 2>&1; then
-    info "Ollama found — LLM routing available"
-else
-    warn "Ollama not found (optional — enables LLM-based voice routing)"
-    warn "  Install: brew install ollama"
-    warn "  Then:    ollama pull llama3.2:3b"
-fi
+info "All dependencies installed"
 
 # --- Copy source files ---
+echo ""
 info "Installing source files..."
-cp "$SCRIPT_DIR"/src/*.py "$ROUTER_INSTALL/"
-info "Voice-router sources → $ROUTER_INSTALL/"
-
-if [[ ! -f "$LISTEN_INSTALL/listen.py" ]]; then
-    cp "$SCRIPT_DIR"/listen/*.py "$LISTEN_INSTALL/"
-    info "Listen sources → $LISTEN_INSTALL/"
-else
-    info "Listen sources already present (skipped)"
-fi
-
-# --- Copy models ---
-mkdir -p "$ROUTER_INSTALL/models"
-if ls "$SCRIPT_DIR"/models/*.onnx >/dev/null 2>&1; then
-    cp "$SCRIPT_DIR"/models/*.onnx "$ROUTER_INSTALL/models/"
-    info "Wake word models installed"
-else
-    info "No wake word models found (add .onnx files to models/ later)"
-fi
+cp "$SCRIPT_DIR"/src/*.py "$INSTALL_DIR/"
+cp "$SCRIPT_DIR"/listen/*.py "$INSTALL_DIR/"
+info "Sources → $INSTALL_DIR/"
 
 # --- Symlink launchers ---
 info "Symlinking launchers..."
@@ -161,6 +142,18 @@ if ! grep -q '$HOME/.local/bin' "$ZSHRC" 2>/dev/null; then
     info "Added ~/.local/bin to PATH in .zshrc"
 fi
 
+# --- launchd plist ---
+echo ""
+PLIST_SRC="$SCRIPT_DIR/config/launchd/com.user.voice-listen-daemon.plist"
+PLIST_DST="$HOME/Library/LaunchAgents/com.user.voice-listen-daemon.plist"
+if [[ -f "$PLIST_SRC" ]]; then
+    mkdir -p "$HOME/Library/LaunchAgents"
+    sed "s|__HOME__|$HOME|g" "$PLIST_SRC" > "$PLIST_DST"
+    info "Installed launchd plist → $PLIST_DST"
+    info "  Start daemon: launchctl load $PLIST_DST"
+    info "  Stop daemon:  launchctl unload $PLIST_DST"
+fi
+
 echo ""
 echo "=== Setup Complete ==="
 echo ""
@@ -168,7 +161,7 @@ echo "Manual steps:"
 echo "  1. Enable iTerm2 Python API:"
 echo "     iTerm2 → Preferences → General → Magic → Enable Python API"
 echo "  2. Grant microphone access to Terminal/iTerm2"
-echo "  3. Install Hammerspoon (for hotkey support):"
+echo "  3. Install Hammerspoon (for push-to-talk hotkey):"
 echo "     brew install --cask hammerspoon"
 echo "  4. Reload zsh: source ~/.zshrc"
 echo ""

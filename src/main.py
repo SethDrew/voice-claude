@@ -12,7 +12,7 @@ import iterm2
 from parser import parse
 from router import route_command, find_session, list_sessions, get_last_active
 
-PID_FILE = os.path.expanduser("~/.local/share/voice-router/listen.pid")
+PID_FILE = os.path.expanduser("~/.local/share/voice-claude/listen.pid")
 
 
 def transcribe_hotkey() -> str:

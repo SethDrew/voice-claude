@@ -16,7 +16,7 @@ import pytest
 
 
 SCRIPT_PATH = os.path.join(os.path.dirname(__file__), '..', 'bin', 'auto-name-session')
-VENV_PYTHON = os.path.expanduser("~/.local/share/voice-router/venv/bin/python3")
+VENV_PYTHON = os.path.expanduser("~/.local/share/voice-claude/venv/bin/python3")
 
 
 # ======================================================================

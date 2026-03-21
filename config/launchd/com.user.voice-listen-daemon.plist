@@ -6,15 +6,15 @@
     <string>com.user.voice-listen-daemon</string>
     <key>ProgramArguments</key>
     <array>
-        <string>__HOME__/.local/share/listen/venv/bin/python</string>
-        <string>__HOME__/.local/share/voice-router/listen_daemon.py</string>
+        <string>__HOME__/.local/share/voice-claude/venv/bin/python</string>
+        <string>__HOME__/.local/share/voice-claude/listen_daemon.py</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>PYTHONPATH</key>
-        <string>__HOME__/.local/share/listen</string>
+        <string>__HOME__/.local/share/voice-claude</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

@@ -49,7 +49,7 @@ def replace_slash_commands(text: str) -> str:
             return slash_form + text[len(voice_form):]
     return text
 
-REGISTRY_FILE = Path.home() / ".local" / "share" / "voice-router" / "name-registry.json"
+REGISTRY_FILE = Path.home() / ".local" / "share" / "voice-claude" / "name-registry.json"
 
 def _load_known_sessions() -> list[str]:
     """Load known session names from the registry."""
