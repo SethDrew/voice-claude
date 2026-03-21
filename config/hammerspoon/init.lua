@@ -439,11 +439,27 @@ voiceRouter.tap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, functi
         voiceRouter.optDown = false
         signalDaemon("USR2")
         hideMicIndicator()
-        -- Hide live overlay after a brief delay (let final chunk arrive)
-        hs.timer.doAfter(1.5, function()
-            hideLiveOverlay()
+        -- Keep chunk polling for 3s after release to catch the final chunk
+        -- (the chunk timer's stop condition checks optDown, so override it)
+        if voiceRouter.chunkTimer then
+            voiceRouter.chunkTimer:stop()
+            voiceRouter.chunkTimer = nil
+        end
+        -- Poll rapidly for the final chunk
+        local finalPollCount = 0
+        voiceRouter.chunkTimer = hs.timer.doEvery(0.1, function()
+            consumeChunks()
+            finalPollCount = finalPollCount + 1
+            if finalPollCount >= 30 then  -- 3 seconds max
+                voiceRouter.chunkTimer:stop()
+                voiceRouter.chunkTimer = nil
+                -- Hide overlay after showing final text
+                hs.timer.doAfter(2, function()
+                    hideLiveOverlay()
+                    voiceRouter.liveText = ""
+                end)
+            end
         end)
-        voiceRouter.liveText = ""
         voiceRouter.pendingCount = voiceRouter.pendingCount + 1
         ensurePolling()
     end
