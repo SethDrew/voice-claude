@@ -44,6 +44,10 @@ local function hideRecordingIndicator()
     hs.alert.closeAll()
 end
 
+-- Forward declarations for functions referenced before definition
+local stopPartialPolling
+local routeFinalText
+
 -- Poll daemon-partial.json for live streaming text
 local function pollPartial()
     local f = io.open(voiceRouter.partialFile, "r")
@@ -55,7 +59,7 @@ local function pollPartial()
     local ok, partial = pcall(hs.json.decode, raw)
     if not ok or not partial then return end
 
-    -- Only update if text changed
+    -- Update display if text changed
     if partial.text and partial.text ~= voiceRouter.lastPartialText then
         voiceRouter.lastPartialText = partial.text
         if #partial.text > 0 then
@@ -68,7 +72,7 @@ local function pollPartial()
         end
     end
 
-    -- Route immediately when final text arrives
+    -- Route when final arrives (check final flag INDEPENDENTLY of text change)
     if partial.final and partial.text and #partial.text > 0 and not voiceRouter.routed then
         voiceRouter.routed = true
         stopPartialPolling()
@@ -85,7 +89,7 @@ local function startPartialPolling()
     end)
 end
 
-local function stopPartialPolling()
+stopPartialPolling = function()
     if voiceRouter.chunkTimer then
         voiceRouter.chunkTimer:stop()
         voiceRouter.chunkTimer = nil
@@ -93,7 +97,7 @@ local function stopPartialPolling()
 end
 
 -- Route the final text
-local function routeFinalText(text)
+routeFinalText = function(text)
     if not text or #text == 0 then return end
 
     local env = {

@@ -52,13 +52,17 @@ def write_state(state, **extra):
     os.replace(tmp, STATE_FILE)
 
 
+_partial_write_lock = threading.Lock()
+
 def write_partial(text, final=False):
     """Write live transcription to partial file for Hammerspoon to display."""
     data = {"text": text, "final": final, "ts": time.time()}
-    tmp = PARTIAL_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f)
-    os.replace(tmp, PARTIAL_FILE)
+    with _partial_write_lock:
+        import tempfile
+        fd, tmp = tempfile.mkstemp(dir=STATE_DIR, prefix=".partial-")
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, PARTIAL_FILE)
 
 
 class StreamListener(TranscriptEventListener):
