@@ -9,7 +9,7 @@ import sys
 
 import iterm2
 
-from parser import parse
+from parser import parse, classify
 from router import route_command, find_session, list_sessions, get_last_active
 
 PID_FILE = os.path.expanduser("~/.local/share/voice-claude/listen.pid")
@@ -163,6 +163,21 @@ async def do_resolve(text: str) -> None:
     sys.exit(1)
 
 
+async def do_classify(text: str, sticky_target: str | None) -> None:
+    """Classify routing intent and print JSON result."""
+    sessions = None
+    try:
+        connection = await iterm2.Connection.async_create()
+        session_list = await list_sessions(connection)
+        sessions = [s["name"] for s in session_list]
+    except Exception:
+        pass
+
+    result = classify(text, sticky_target, sessions)
+    import json
+    print(json.dumps(result))
+
+
 async def do_list() -> None:
     """List available cc sessions."""
     connection = await iterm2.Connection.async_create()
@@ -181,8 +196,10 @@ def main():
     group.add_argument("--text", type=str, help="Route pre-transcribed text")
     group.add_argument("--resolve", type=str, help="Resolve target session without routing")
     group.add_argument("--list", action="store_true", help="List available cc sessions")
+    group.add_argument("--classify", type=str, help="Classify routing intent")
 
     ap.add_argument("--target", type=str, help="Route directly to this target (with --text)")
+    ap.add_argument("--sticky-target", type=str, help="Current sticky target for classification")
     ap.add_argument("--no-newline", action="store_true", help="Send text without trailing newline (for streaming chunks)")
 
     args = ap.parse_args()
@@ -203,6 +220,9 @@ def main():
 
     elif args.text:
         asyncio.run(do_route(args.text))
+
+    elif args.classify:
+        asyncio.run(do_classify(args.classify, getattr(args, 'sticky_target', None)))
 
     elif args.list:
         asyncio.run(do_list())

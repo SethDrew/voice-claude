@@ -200,39 +200,49 @@ local function routeToTarget(target, text)
     task:start()
 end
 
-local function shouldSwitchTarget(text, currentTarget)
-    -- Routing intelligence: decide whether to switch target or send as content.
-    -- Rules:
-    --   1. Focus verbs ALWAYS switch (regardless of length)
-    --   2. Long messages (7+ words) are ALWAYS content for sticky target
-    --   3. Short messages (<=6 words) with routing verb -> switch target
-    --   4. Very short (1-3 words) -> let resolver figure it out (possible session name)
-    local lower = text:lower()
-    local wordCount = select(2, lower:gsub("%S+", ""))
+local function classifyText(text, stickyTarget)
+    local env = {
+        PATH = os.getenv("HOME") .. "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        HOME = os.getenv("HOME"),
+    }
 
-    -- Focus verbs ALWAYS switch (regardless of length)
-    if lower:match("^go%s+to%s") or lower:match("^switch%s+to%s") or lower:match("^focus%s") then
-        return true
-    end
+    local task = hs.task.new(
+        os.getenv("HOME") .. "/.local/bin/voice-route",
+        function(exitCode, stdout, stderr)
+            if exitCode ~= 0 or not stdout then
+                -- Classification failed — send as content to sticky target
+                routeToTarget(voiceRouter.pendingTarget, text)
+                return
+            end
 
-    -- Long messages (7+ words) are ALWAYS content when we have a sticky target
-    if wordCount >= 7 and currentTarget then
-        return false
-    end
+            local ok, result = pcall(hs.json.decode, stdout)
+            if not ok or not result then
+                routeToTarget(voiceRouter.pendingTarget, text)
+                return
+            end
 
-    -- Short messages: check for routing verb + session name
-    if lower:match("^tell%s") or lower:match("^ask%s") or lower:match("^send%s")
-       or lower:match("^hey%s") or lower:match("^yo%s") or lower:match("^ping%s")
-       or lower:match("^for%s") or lower:match("^message%s") then
-        return true
-    end
-
-    -- Very short (1-3 words): could be just a session name
-    if wordCount <= 3 and not currentTarget then
-        return true  -- let the resolver figure it out
-    end
-
-    return false
+            if result.action == "switch" and result.target then
+                -- Switch to new target
+                clearPendingTarget()
+                voiceRouter.pendingTarget = result.target
+                showTargetOverlay(result.target)
+                hs.timer.doAfter(3, function() hideTargetOverlay() end)
+                -- Send the command text if present
+                if result.text and #result.text > 0 then
+                    routeToTarget(result.target, result.text)
+                end
+            elseif result.action == "self" and result.text then
+                -- Self-routing: strip prefix, send content
+                routeToTarget(voiceRouter.pendingTarget, result.text)
+            else
+                -- Content: send full text to sticky target
+                routeToTarget(voiceRouter.pendingTarget, text)
+            end
+        end,
+        {"--classify", text, "--sticky-target", stickyTarget}
+    )
+    task:setEnvironment(env)
+    task:start()
 end
 
 local function processQueue()
@@ -247,26 +257,22 @@ local function processQueue()
         return
     end
 
+    -- Tier 1: Fast-path for unambiguous focus verbs (0ms, in Lua)
+    local lower = text:lower()
+    if lower:match("^go%s+to%s") or lower:match("^switch%s+to%s") or lower:match("^focus%s") then
+        voiceRouter.routing = false
+        clearPendingTarget()
+        resolveTarget(text)
+        return
+    end
+
     if voiceRouter.pendingTarget then
-        if shouldSwitchTarget(text, voiceRouter.pendingTarget) then
-            -- Short/explicit routing command — resolve new target
-            voiceRouter.routing = false
-            clearPendingTarget()
-            resolveTarget(text)
-        else
-            -- Content for sticky target
-            routeToTarget(voiceRouter.pendingTarget, text)
-        end
+        -- Tier 2: Ask the parser to classify (Python, ~20-50ms)
+        classifyText(text, voiceRouter.pendingTarget)
     else
-        -- No target yet — check if it looks like a routing command
-        if shouldSwitchTarget(text, nil) then
-            voiceRouter.routing = false
-            resolveTarget(text)
-        else
-            -- Bare content — resolve from speech
-            voiceRouter.routing = false
-            resolveTarget(text)
-        end
+        -- No target — resolve
+        voiceRouter.routing = false
+        resolveTarget(text)
     end
 end
 

@@ -212,3 +212,72 @@ def parse(raw: str) -> ParsedCommand:
 
     # Bare text — route to last-active
     return ParsedCommand(target=None, text=text)
+
+
+def classify(text: str, sticky_target: str | None, sessions: list[str] | None = None) -> dict:
+    """Classify whether text is a routing command or content for the sticky target.
+
+    Uses parse() to detect routing intent, then compares the parsed target
+    against the current sticky_target to decide the action.
+
+    Returns one of:
+        {"action": "switch", "target": "<name>", "text": "<command>"}
+        {"action": "content", "text": "<full original text>"}
+        {"action": "self", "text": "<stripped text>"}
+    """
+    # Provide session list to parser via _load_known_sessions patch
+    if sessions is not None:
+        import unittest.mock
+        with unittest.mock.patch('parser._load_known_sessions', return_value=sessions):
+            cmd = parse(text)
+    else:
+        cmd = parse(text)
+
+    # No target detected — it's bare content
+    if cmd.target is None:
+        return {"action": "content", "text": text}
+
+    # No sticky target — any detected target is a switch
+    if sticky_target is None:
+        return {"action": "switch", "target": cmd.target, "text": cmd.text}
+
+    # Compare parsed target to sticky target using fuzzy matching
+    if _is_same_target(cmd.target, sticky_target):
+        # Self-routing: strip the prefix, send just the command text
+        return {"action": "self", "text": cmd.text}
+
+    # Different target — switch
+    return {"action": "switch", "target": cmd.target, "text": cmd.text}
+
+
+def _is_same_target(parsed: str, sticky: str) -> bool:
+    """Check if parsed target matches the sticky target (fuzzy).
+
+    Uses the same thresholds as router._fuzzy_match:
+      - Direct substring match
+      - Joined-form substring match
+      - ratio >= 65 or partial_ratio >= 80
+    """
+    p = parsed.lower()
+    s = sticky.lower()
+
+    if p == s:
+        return True
+
+    # Direct substring match
+    if p in s or s in p:
+        return True
+
+    # Joined forms (remove spaces/hyphens)
+    p_joined = re.sub(r'[\s\-]+', '', p)
+    s_joined = re.sub(r'[\s\-]+', '', s)
+    if p_joined in s_joined or s_joined in p_joined:
+        return True
+
+    # Fuzzy matching with same thresholds as router._fuzzy_match
+    if fuzz.ratio(p_joined, s_joined) >= 65:
+        return True
+    if fuzz.partial_ratio(p_joined, s_joined) >= 80:
+        return True
+
+    return False
