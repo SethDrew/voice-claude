@@ -59,7 +59,6 @@ local function pollPartial()
     if partial.text and partial.text ~= voiceRouter.lastPartialText then
         voiceRouter.lastPartialText = partial.text
         if #partial.text > 0 then
-            -- Replace the alert with updated text (closeAll + show)
             hs.alert.closeAll()
             local display = "🎤 " .. partial.text
             if voiceRouter.pendingTarget then
@@ -67,6 +66,14 @@ local function pollPartial()
             end
             hs.alert.show(display, nil, nil, 30)
         end
+    end
+
+    -- Route immediately when final text arrives
+    if partial.final and partial.text and #partial.text > 0 and not voiceRouter.routed then
+        voiceRouter.routed = true
+        stopPartialPolling()
+        hs.timer.doAfter(0.5, function() hs.alert.closeAll() end)
+        routeFinalText(partial.text)
     end
 end
 
@@ -248,6 +255,7 @@ voiceRouter.tap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, functi
 
     if optOnly and not voiceRouter.optDown then
         voiceRouter.optDown = true
+        voiceRouter.routed = false
         signalDaemon("USR1")
         showRecordingIndicator()
         startPartialPolling()
@@ -255,13 +263,15 @@ voiceRouter.tap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, functi
     elseif not rightOpt and voiceRouter.optDown then
         voiceRouter.optDown = false
         signalDaemon("USR2")
-        stopPartialPolling()
-        -- Keep alerts showing final text for 2s
-        hs.timer.doAfter(2, function()
-            hideRecordingIndicator()
+        -- Don't stop partial polling yet — wait for final:true
+        -- It will stop itself when it sees final and routes
+        -- Safety: stop after 5s if no final arrives
+        hs.timer.doAfter(5, function()
+            stopPartialPolling()
+            if not voiceRouter.routed then
+                hs.alert.closeAll()
+            end
         end)
-        voiceRouter.pendingCount = voiceRouter.pendingCount + 1
-        ensurePolling()
     end
 
     return false
