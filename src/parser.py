@@ -323,7 +323,9 @@ def classify(text: str, sticky_target: str | None, sessions: list[str] | None = 
 
             # Compare parsed target to sticky target using fuzzy matching
             if _is_same_target(cmd.target, sticky_target):
-                return {"action": "self", "text": cmd.text}
+                # Self-routing: send FULL original text (the routing phrase
+                # is part of the user's thought, not a command to strip)
+                return {"action": "self", "text": text}
 
             # Different target — switch
             return {"action": "switch", "target": cmd.target, "text": cmd.text}
