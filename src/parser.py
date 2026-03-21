@@ -214,17 +214,85 @@ def parse(raw: str) -> ParsedCommand:
     return ParsedCommand(target=None, text=text)
 
 
+def _scan_anywhere_target(text: str, sessions: list[str]) -> str | None:
+    """Scan for routing patterns ANYWHERE in the text.
+
+    This is a fallback for when parse() (which checks start-of-message
+    patterns) finds no target. It looks for preposition-based routing
+    patterns that indicate the user wants to direct the message to a
+    specific session.
+
+    Routing patterns (preposition + session name):
+        - "send [this] to <session>"
+        - "route [this] to <session>"
+        - "switch to <session>"
+        - "go to <session>"
+        - "talk to <session>"
+        - "for <session>" at the END of the message only
+
+    NOT routing (session as subject/object):
+        - "firmware has a bug"
+        - "check if firmware works"
+        - "like firmware does"
+
+    Returns the matched session name or None.
+    """
+    if not sessions:
+        return None
+
+    # Patterns where a session name follows a routing preposition.
+    # Each pattern captures what comes after the preposition.
+    # We try to match the captured word(s) against known sessions.
+    routing_patterns = [
+        # "send [this/it] to <session>"
+        r'(?:send|route|forward|redirect)(?:\s+(?:this|it|that))?\s+to\s+(\S+)',
+        # "switch to <session>", "go to <session>"
+        r'(?:switch|go|move)\s+to\s+(\S+)',
+        # "talk to <session>" / "speak to <session>"
+        r'(?:talk|speak)\s+to\s+(?:the\s+)?(\S+)',
+        # "to the <session> session" (mid-sentence with "session" after)
+        r'to\s+(?:the\s+)?(\S+)\s+session',
+    ]
+
+    for pattern in routing_patterns:
+        for m in re.finditer(pattern, text, re.IGNORECASE):
+            candidate = m.group(1).rstrip('.,;:!?')
+            matched = _fuzzy_session_match(candidate, sessions)
+            if matched:
+                return matched
+
+    # "for <session>" at the END of the message only
+    # This avoids false positives like "the fix for firmware is in the PR"
+    end_for = re.search(r'(?:^|,\s*|\.\s*)\s*(?:this\s+is\s+)?for\s+(\S+)\s*[.!?]?\s*$', text, re.IGNORECASE)
+    if end_for:
+        candidate = end_for.group(1).rstrip('.,;:!?')
+        matched = _fuzzy_session_match(candidate, sessions)
+        if matched:
+            return matched
+
+    return None
+
+
 def classify(text: str, sticky_target: str | None, sessions: list[str] | None = None) -> dict:
     """Classify whether text is a routing command or content for the sticky target.
 
     Uses parse() to detect routing intent, then compares the parsed target
     against the current sticky_target to decide the action.
 
+    Fallback order:
+        1. parse() — start-of-message patterns (tell X, go to X, etc.)
+        2. _scan_anywhere_target() — routing prepositions anywhere in text
+        3. LLM router (if available)
+        4. Return as content for sticky target or last-active
+
     Returns one of:
         {"action": "switch", "target": "<name>", "text": "<command>"}
         {"action": "content", "text": "<full original text>"}
         {"action": "self", "text": "<stripped text>"}
     """
+    # Resolve session list
+    effective_sessions = sessions if sessions is not None else _load_known_sessions()
+
     # Provide session list to parser via _load_known_sessions patch
     if sessions is not None:
         import unittest.mock
@@ -233,21 +301,45 @@ def classify(text: str, sticky_target: str | None, sessions: list[str] | None = 
     else:
         cmd = parse(text)
 
-    # No target detected — it's bare content
-    if cmd.target is None:
-        return {"action": "content", "text": text}
+    # If parse() found a target, validate it against known sessions.
+    # If the target matches a known session (or the sticky target), use it.
+    # Otherwise, fall through to the anywhere-scan — parse() may have
+    # misidentified a non-session word as the target (e.g., "send this to
+    # firmware" → parse() extracts target="this", but the real target is
+    # "firmware" detected by the anywhere-scan).
+    if cmd.target is not None:
+        target_is_known = (
+            _fuzzy_session_match(cmd.target, effective_sessions) is not None
+            if effective_sessions else True  # no sessions to validate against
+        )
+        target_matches_sticky = (
+            sticky_target is not None and _is_same_target(cmd.target, sticky_target)
+        )
 
-    # No sticky target — any detected target is a switch
-    if sticky_target is None:
-        return {"action": "switch", "target": cmd.target, "text": cmd.text}
+        if target_is_known or target_matches_sticky:
+            # No sticky target — any detected target is a switch
+            if sticky_target is None:
+                return {"action": "switch", "target": cmd.target, "text": cmd.text}
 
-    # Compare parsed target to sticky target using fuzzy matching
-    if _is_same_target(cmd.target, sticky_target):
-        # Self-routing: strip the prefix, send just the command text
-        return {"action": "self", "text": cmd.text}
+            # Compare parsed target to sticky target using fuzzy matching
+            if _is_same_target(cmd.target, sticky_target):
+                return {"action": "self", "text": cmd.text}
 
-    # Different target — switch
-    return {"action": "switch", "target": cmd.target, "text": cmd.text}
+            # Different target — switch
+            return {"action": "switch", "target": cmd.target, "text": cmd.text}
+
+    # parse() found no target, or its target didn't match any known session.
+    # Try anywhere-scan as fallback.
+    anywhere_target = _scan_anywhere_target(text, effective_sessions)
+    if anywhere_target is not None:
+        # Anywhere-scan found a target — treat full text as the command
+        if sticky_target is not None and _is_same_target(anywhere_target, sticky_target):
+            return {"action": "self", "text": text}
+
+        return {"action": "switch", "target": anywhere_target, "text": text}
+
+    # No target found anywhere — it's bare content
+    return {"action": "content", "text": text}
 
 
 def _is_same_target(parsed: str, sticky: str) -> bool:

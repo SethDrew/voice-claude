@@ -10,7 +10,7 @@ import sys
 import iterm2
 
 from parser import parse, classify
-from router import route_command, find_session, list_sessions, get_last_active
+from router import route_command, find_session, list_sessions, get_last_active, NAME_REGISTRY_FILE
 
 PID_FILE = os.path.expanduser("~/.local/share/voice-claude/listen.pid")
 
@@ -179,7 +179,9 @@ async def do_classify(text: str, sticky_target: str | None) -> None:
 
 
 async def do_list() -> None:
-    """List available cc sessions."""
+    """List available cc sessions and prune dead entries from the name registry."""
+    import json
+
     connection = await iterm2.Connection.async_create()
     sessions = await list_sessions(connection)
     if not sessions:
@@ -187,6 +189,18 @@ async def do_list() -> None:
         return
     for s in sessions:
         print(f"  {s['name']:<20} {s['title']}")
+
+    # Prune dead sessions from the name registry
+    try:
+        registry = json.loads(NAME_REGISTRY_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        registry = None
+
+    if registry is not None:
+        live_names = {s["name"] for s in sessions}
+        cleaned = {k: v for k, v in registry.items() if v in live_names}
+        if len(cleaned) != len(registry):
+            NAME_REGISTRY_FILE.write_text(json.dumps(cleaned))
 
 
 def main():
