@@ -362,7 +362,25 @@ local function consumeResults()
     processQueue()
 end
 
--- Live transcription: show chunks in overlay as they arrive
+-- Live transcription: read daemon-partial.json for streaming text display
+local function consumePartial()
+    local partialFile = os.getenv("HOME") .. "/.local/share/voice-claude/daemon-partial.json"
+    local f = io.open(partialFile, "r")
+    if not f then return end
+    local raw = f:read("*a")
+    f:close()
+    if not raw or #raw == 0 then return end
+
+    local ok, partial = pcall(hs.json.decode, raw)
+    if not ok or not partial then return end
+
+    if partial.text and #partial.text > 0 and partial.text ~= voiceRouter.liveText then
+        voiceRouter.liveText = partial.text
+        updateLiveOverlay(voiceRouter.liveText)
+    end
+end
+
+-- Legacy chunk consumer (kept for v1 compat)
 local function consumeChunks()
     local f = io.open(voiceRouter.chunksFile, "r")
     if not f then return end
@@ -373,7 +391,6 @@ local function consumeChunks()
         if lineNum > voiceRouter.lastChunkLine then
             local ok, chunk = pcall(hs.json.decode, line)
             if ok and chunk and chunk.text and #chunk.text > 0 then
-                -- Append chunk text to live display
                 if #voiceRouter.liveText > 0 then
                     voiceRouter.liveText = voiceRouter.liveText .. " " .. chunk.text
                 else
@@ -392,6 +409,8 @@ local function startChunkPolling()
     voiceRouter.lastChunkLine = 0
     voiceRouter.liveText = ""
     voiceRouter.chunkTimer = hs.timer.doEvery(0.15, function()
+        -- Try v2 partial file first, fall back to v1 chunks
+        consumePartial()
         consumeChunks()
 
         if not voiceRouter.optDown then
