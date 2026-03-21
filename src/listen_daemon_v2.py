@@ -24,6 +24,8 @@ import sys
 import threading
 import time
 
+from moonshine_voice.transcriber import TranscriptEventListener
+
 # Paths
 STATE_DIR = os.path.expanduser("~/.local/share/voice-claude")
 STATE_FILE = os.path.join(STATE_DIR, "daemon-state.json")
@@ -59,7 +61,7 @@ def write_partial(text, final=False):
     os.replace(tmp, PARTIAL_FILE)
 
 
-class StreamListener:
+class StreamListener(TranscriptEventListener):
     """Receives live transcription events from Moonshine."""
 
     def on_line_started(self, event):
@@ -68,7 +70,6 @@ class StreamListener:
     def on_line_text_changed(self, event):
         global _live_text
         with _lock:
-            # Build full text: finalized lines + current live line
             parts = list(_finalized_lines)
             if event.line.text:
                 parts.append(event.line.text)
@@ -188,7 +189,6 @@ def main():
 
     # Load Moonshine
     from moonshine_voice import MicTranscriber, get_model_for_language
-    from moonshine_voice.transcriber import TranscriptEventListener
 
     print("[v2] loading Moonshine model...", flush=True)
     t0 = time.time()

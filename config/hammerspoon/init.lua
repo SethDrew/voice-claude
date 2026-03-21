@@ -58,15 +58,14 @@ local function pollPartial()
     -- Only update if text changed
     if partial.text and partial.text ~= voiceRouter.lastPartialText then
         voiceRouter.lastPartialText = partial.text
-        -- Show live text as a simple alert (replaces previous)
         if #partial.text > 0 then
+            -- Replace the alert with updated text (closeAll + show)
             hs.alert.closeAll()
-            -- Show target prefix if sticky
-            local display = partial.text
+            local display = "🎤 " .. partial.text
             if voiceRouter.pendingTarget then
-                display = "→ " .. voiceRouter.pendingTarget .. "\n" .. display
+                display = "→ " .. voiceRouter.pendingTarget .. "\n🎤 " .. partial.text
             end
-            hs.alert.show(display, nil, nil, 10)
+            hs.alert.show(display, nil, nil, 30)
         end
     end
 end
@@ -220,11 +219,20 @@ local function ensurePolling()
         consumeResults()
 
         if voiceRouter.pendingCount <= 0 and not voiceRouter.optDown then
-            local f = io.open(voiceRouter.resultsFile, "w")
-            if f then f:close() end
-            voiceRouter.lastResultLine = 0
-            voiceRouter.pollTimer:stop()
-            voiceRouter.pollTimer = nil
+            -- Don't truncate — wait longer for daemon to write
+            -- Only stop after we've actually consumed a result OR 5s passed
+            if not voiceRouter.pollStartTime then
+                voiceRouter.pollStartTime = hs.timer.secondsSinceEpoch()
+            end
+            local elapsed = hs.timer.secondsSinceEpoch() - (voiceRouter.pollStartTime or 0)
+            if elapsed > 5 then
+                local f = io.open(voiceRouter.resultsFile, "w")
+                if f then f:close() end
+                voiceRouter.lastResultLine = 0
+                voiceRouter.pollStartTime = nil
+                voiceRouter.pollTimer:stop()
+                voiceRouter.pollTimer = nil
+            end
         end
     end)
 end
