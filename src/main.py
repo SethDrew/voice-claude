@@ -46,18 +46,43 @@ def transcribe_hotkey() -> str:
 
 
 async def do_route(text: str) -> None:
-    """Parse and route a text command."""
-    cmd = parse(text)
-    if cmd.target is None and cmd.text is None:
+    """Parse and route a text command. Tries LLM first, falls back to regex."""
+    # Try LLM first for best intent understanding
+    target = None
+    cmd_text = None
+    try:
+        from llm_router import is_available, llm_parse
+        if is_available():
+            connection = await iterm2.Connection.async_create()
+            sessions = await list_sessions(connection)
+            session_names = [s["name"] for s in sessions]
+            if session_names:
+                result = llm_parse(text, session_names)
+                if result:
+                    target = result.get("target")
+                    cmd_text = result.get("text")
+    except ImportError:
+        pass
+
+    # Fallback to regex parser if LLM didn't produce a result
+    if target is None and cmd_text is None:
+        cmd = parse(text)
+        target = cmd.target
+        cmd_text = cmd.text
+
+    if target is None and cmd_text is None:
         print("Empty command, nothing to do")
         return
 
-    connection = await iterm2.Connection.async_create()
-    success = await route_command(connection, cmd.target, cmd.text)
+    try:
+        connection
+    except NameError:
+        connection = await iterm2.Connection.async_create()
+    success = await route_command(connection, target, cmd_text)
     if success:
-        desc = f"→ {cmd.target or 'last-active'}"
-        if cmd.text:
-            preview = cmd.text[:60] + ("..." if len(cmd.text) > 60 else "")
+        desc = f"→ {target or 'last-active'}"
+        if cmd_text:
+            preview = cmd_text[:60] + ("..." if len(cmd_text) > 60 else "")
             desc += f": {preview}"
         else:
             desc += " (focus)"
@@ -80,23 +105,49 @@ async def do_resolve(text: str) -> None:
     Always goes through the router's fuzzy matching to get the actual
     session name (e.g., "ledger" → "ledger-skill").
     """
-    cmd = parse(text)
-    search = cmd.target or text.strip().lower()
-
     connection = await iterm2.Connection.async_create()
-    session = await find_session(connection, search)
-    if session:
-        cc_name = await session.async_get_variable("user.cc_name")
-        if cc_name:
-            print(cc_name)
-            return
+    sessions = await list_sessions(connection)
+    session_names = [s["name"] for s in sessions]
 
-    # Fall back to last-active
-    last = get_last_active()
-    if last:
-        print(last)
-    else:
-        sys.exit(1)
+    # Try LLM first (best understanding of intent)
+    try:
+        from llm_router import is_available, llm_parse
+        if is_available() and session_names:
+            result = llm_parse(text, session_names)
+            if result and result.get("target"):
+                target = result["target"]
+                session = await find_session(connection, target)
+                if session:
+                    cc_name = await session.async_get_variable("user.cc_name")
+                    if cc_name:
+                        print(cc_name)
+                        return
+    except ImportError:
+        pass
+
+    # Fallback: regex parser
+    cmd = parse(text)
+    if cmd.target:
+        session = await find_session(connection, cmd.target)
+        if session:
+            cc_name = await session.async_get_variable("user.cc_name")
+            if cc_name:
+                print(cc_name)
+                return
+
+    # Fallback: try each word against session names
+    for word in text.strip().lower().split():
+        if len(word) < 3:
+            continue
+        session = await find_session(connection, word)
+        if session:
+            cc_name = await session.async_get_variable("user.cc_name")
+            if cc_name:
+                print(cc_name)
+                return
+
+    # No match found
+    sys.exit(1)
 
 
 async def do_list() -> None:

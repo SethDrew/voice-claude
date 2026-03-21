@@ -162,10 +162,9 @@ local function resolveTarget(text)
                 voiceRouter.pendingTarget = target
                 showTargetOverlay(target)
 
-                -- Auto-clear after 15 seconds
-                if voiceRouter.targetTimeout then voiceRouter.targetTimeout:stop() end
-                voiceRouter.targetTimeout = hs.timer.doAfter(15, function()
-                    clearPendingTarget()
+                -- Show overlay for 3 seconds then hide (target stays sticky in memory)
+                hs.timer.doAfter(3, function()
+                    hideTargetOverlay()
                 end)
             else
                 -- Couldn't resolve — show error briefly
@@ -184,6 +183,9 @@ local function routeToTarget(target, text)
         HOME = os.getenv("HOME"),
     }
 
+    -- Hide the overlay once we start routing (target stays sticky in memory)
+    hideTargetOverlay()
+
     local task = hs.task.new(
         os.getenv("HOME") .. "/.local/bin/voice-route",
         function(exitCode, stdout, stderr)
@@ -193,6 +195,15 @@ local function routeToTarget(target, text)
     )
     task:setEnvironment(env)
     task:start()
+end
+
+local function hasExplicitTarget(text)
+    -- Check if the text starts with a routing verb (tell/ask/hey/go to/switch to/for/focus)
+    local lower = text:lower()
+    return lower:match("^tell%s") or lower:match("^ask%s") or lower:match("^send%s")
+        or lower:match("^hey%s") or lower:match("^yo%s") or lower:match("^ping%s")
+        or lower:match("^for%s") or lower:match("^message%s")
+        or lower:match("^go%s+to%s") or lower:match("^switch%s+to%s") or lower:match("^focus%s")
 end
 
 local function processQueue()
@@ -207,13 +218,16 @@ local function processQueue()
         return
     end
 
-    if voiceRouter.pendingTarget then
-        -- Second press: route to confirmed target
-        local target = voiceRouter.pendingTarget
+    if hasExplicitTarget(text) then
+        -- User said "tell X..." or "switch to X" — resolve new target
+        voiceRouter.routing = false
         clearPendingTarget()
-        routeToTarget(target, text)
+        resolveTarget(text)
+    elseif voiceRouter.pendingTarget then
+        -- Active target — route directly, stays sticky forever
+        routeToTarget(voiceRouter.pendingTarget, text)
     else
-        -- First press: resolve target from speech
+        -- No target yet — resolve from speech
         voiceRouter.routing = false
         resolveTarget(text)
     end
