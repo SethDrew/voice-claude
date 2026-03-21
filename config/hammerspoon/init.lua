@@ -15,6 +15,9 @@ voiceRouter.routing = false
 voiceRouter.lastResultLine = 0
 voiceRouter.pendingCount = 0
 voiceRouter.canvas = nil
+voiceRouter.chunksFile = os.getenv("HOME") .. "/.local/share/voice-claude/daemon-chunks.jsonl"
+voiceRouter.lastChunkLine = 0
+voiceRouter.chunkTimer = nil
 
 -- Two-press state
 voiceRouter.pendingTarget = nil      -- confirmed target from first press
@@ -197,13 +200,39 @@ local function routeToTarget(target, text)
     task:start()
 end
 
-local function hasExplicitTarget(text)
-    -- Check if the text starts with a routing verb (tell/ask/hey/go to/switch to/for/focus)
+local function shouldSwitchTarget(text, currentTarget)
+    -- Routing intelligence: decide whether to switch target or send as content.
+    -- Rules:
+    --   1. Focus verbs ALWAYS switch (regardless of length)
+    --   2. Long messages (7+ words) are ALWAYS content for sticky target
+    --   3. Short messages (<=6 words) with routing verb -> switch target
+    --   4. Very short (1-3 words) -> let resolver figure it out (possible session name)
     local lower = text:lower()
-    return lower:match("^tell%s") or lower:match("^ask%s") or lower:match("^send%s")
-        or lower:match("^hey%s") or lower:match("^yo%s") or lower:match("^ping%s")
-        or lower:match("^for%s") or lower:match("^message%s")
-        or lower:match("^go%s+to%s") or lower:match("^switch%s+to%s") or lower:match("^focus%s")
+    local wordCount = select(2, lower:gsub("%S+", ""))
+
+    -- Focus verbs ALWAYS switch (regardless of length)
+    if lower:match("^go%s+to%s") or lower:match("^switch%s+to%s") or lower:match("^focus%s") then
+        return true
+    end
+
+    -- Long messages (7+ words) are ALWAYS content when we have a sticky target
+    if wordCount >= 7 and currentTarget then
+        return false
+    end
+
+    -- Short messages: check for routing verb + session name
+    if lower:match("^tell%s") or lower:match("^ask%s") or lower:match("^send%s")
+       or lower:match("^hey%s") or lower:match("^yo%s") or lower:match("^ping%s")
+       or lower:match("^for%s") or lower:match("^message%s") then
+        return true
+    end
+
+    -- Very short (1-3 words): could be just a session name
+    if wordCount <= 3 and not currentTarget then
+        return true  -- let the resolver figure it out
+    end
+
+    return false
 end
 
 local function processQueue()
@@ -218,18 +247,26 @@ local function processQueue()
         return
     end
 
-    if hasExplicitTarget(text) then
-        -- User said "tell X..." or "switch to X" — resolve new target
-        voiceRouter.routing = false
-        clearPendingTarget()
-        resolveTarget(text)
-    elseif voiceRouter.pendingTarget then
-        -- Active target — route directly, stays sticky forever
-        routeToTarget(voiceRouter.pendingTarget, text)
+    if voiceRouter.pendingTarget then
+        if shouldSwitchTarget(text, voiceRouter.pendingTarget) then
+            -- Short/explicit routing command — resolve new target
+            voiceRouter.routing = false
+            clearPendingTarget()
+            resolveTarget(text)
+        else
+            -- Content for sticky target
+            routeToTarget(voiceRouter.pendingTarget, text)
+        end
     else
-        -- No target yet — resolve from speech
-        voiceRouter.routing = false
-        resolveTarget(text)
+        -- No target yet — check if it looks like a routing command
+        if shouldSwitchTarget(text, nil) then
+            voiceRouter.routing = false
+            resolveTarget(text)
+        else
+            -- Bare content — resolve from speech
+            voiceRouter.routing = false
+            resolveTarget(text)
+        end
     end
 end
 
@@ -254,6 +291,70 @@ local function consumeResults()
     f:close()
 
     processQueue()
+end
+
+local function sendChunkToTarget(target, text, isFinal)
+    -- Send a transcribed chunk to the target session via voice-route CLI
+    local env = {
+        PATH = os.getenv("HOME") .. "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        HOME = os.getenv("HOME"),
+    }
+
+    local args
+    if isFinal then
+        -- Final chunk: send with newline (submits the command)
+        args = {"--target", target, "--text", text}
+    else
+        -- Non-final chunk: send without newline (streaming append)
+        args = {"--target", target, "--text", text, "--no-newline"}
+    end
+
+    local task = hs.task.new(
+        os.getenv("HOME") .. "/.local/bin/voice-route",
+        function(exitCode, stdout, stderr)
+            -- chunk sent
+        end,
+        args
+    )
+    task:setEnvironment(env)
+    task:start()
+end
+
+local function consumeChunks()
+    -- Poll daemon-chunks.jsonl for new streaming chunks during recording
+    if not voiceRouter.pendingTarget then return end
+
+    local f = io.open(voiceRouter.chunksFile, "r")
+    if not f then return end
+
+    local lineNum = 0
+    for line in f:lines() do
+        lineNum = lineNum + 1
+        if lineNum > voiceRouter.lastChunkLine then
+            local ok, chunk = pcall(hs.json.decode, line)
+            if ok and chunk and chunk.text and #chunk.text > 0 then
+                sendChunkToTarget(voiceRouter.pendingTarget, chunk.text, chunk.final or false)
+            end
+            voiceRouter.lastChunkLine = lineNum
+        end
+    end
+    f:close()
+end
+
+local function startChunkPolling()
+    if voiceRouter.chunkTimer then return end
+    voiceRouter.lastChunkLine = 0
+    voiceRouter.chunkTimer = hs.timer.doEvery(0.15, function()
+        consumeChunks()
+
+        -- Stop chunk polling when recording ends
+        if not voiceRouter.optDown then
+            if voiceRouter.chunkTimer then
+                voiceRouter.chunkTimer:stop()
+                voiceRouter.chunkTimer = nil
+            end
+        end
+    end)
 end
 
 local function ensurePolling()
@@ -285,6 +386,10 @@ voiceRouter.tap = hs.eventtap.new({hs.eventtap.event.types.flagsChanged}, functi
         voiceRouter.optDown = true
         signalDaemon("USR1")
         showMicIndicator()
+        -- Start chunk polling if we have a sticky target (streaming mode)
+        if voiceRouter.pendingTarget then
+            startChunkPolling()
+        end
 
     elseif not rightOpt and voiceRouter.optDown then
         voiceRouter.optDown = false

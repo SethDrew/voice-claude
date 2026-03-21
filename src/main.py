@@ -89,12 +89,25 @@ async def do_route(text: str) -> None:
         print(desc)
 
 
-async def do_route_to_target(target: str, text: str) -> None:
-    """Route text directly to a named target (skip parsing)."""
+async def do_route_to_target(target: str, text: str, no_newline: bool = False) -> None:
+    """Route text directly to a named target (skip parsing).
+
+    If no_newline is True, the text is sent without a trailing newline
+    (used for streaming chunks that should not submit yet).
+    """
     connection = await iterm2.Connection.async_create()
-    success = await route_command(connection, target, text)
-    if success:
-        print(f"→ {target}: {text[:60]}")
+    if no_newline:
+        # Send directly without newline — bypass route_command which appends \n
+        session = await find_session(connection, target)
+        if session:
+            await session.async_send_text(text)
+            print(f"→ {target} (chunk): {text[:60]}")
+        else:
+            print(f"Error: session '{target}' not found")
+    else:
+        success = await route_command(connection, target, text)
+        if success:
+            print(f"→ {target}: {text[:60]}")
 
 
 async def do_resolve(text: str) -> None:
@@ -170,6 +183,7 @@ def main():
     group.add_argument("--list", action="store_true", help="List available cc sessions")
 
     ap.add_argument("--target", type=str, help="Route directly to this target (with --text)")
+    ap.add_argument("--no-newline", action="store_true", help="Send text without trailing newline (for streaming chunks)")
 
     args = ap.parse_args()
 
@@ -185,7 +199,7 @@ def main():
         asyncio.run(do_resolve(args.resolve))
 
     elif args.text and args.target:
-        asyncio.run(do_route_to_target(args.target, args.text))
+        asyncio.run(do_route_to_target(args.target, args.text, no_newline=args.no_newline))
 
     elif args.text:
         asyncio.run(do_route(args.text))
