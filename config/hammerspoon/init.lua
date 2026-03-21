@@ -314,8 +314,28 @@ local function processQueue()
     if voiceRouter.pendingTarget then
         classifyText(text, voiceRouter.pendingTarget)
     else
-        voiceRouter.routing = false
-        resolveTarget(text)
+        -- No sticky target — use voice-route --text which handles
+        -- target extraction and last-active fallback
+        local env = {
+            PATH = os.getenv("HOME") .. "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+            HOME = os.getenv("HOME"),
+        }
+        local task = hs.task.new(
+            os.getenv("HOME") .. "/.local/bin/voice-route",
+            function(exitCode, stdout, stderr)
+                voiceRouter.routing = false
+                -- If the route resolved a target, capture it as sticky
+                if exitCode == 0 and stdout then
+                    local target = stdout:match("→%s*([^:]+)")
+                    if target then
+                        voiceRouter.pendingTarget = target:match("^%s*(.-)%s*$")
+                    end
+                end
+            end,
+            {"--text", text}
+        )
+        task:setEnvironment(env)
+        task:start()
     end
 end
 
