@@ -6,3 +6,4 @@ models/*.onnx
 *.egg-info/
 *.egg
 .env
+.claude/
