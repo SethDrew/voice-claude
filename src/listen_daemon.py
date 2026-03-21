@@ -170,11 +170,59 @@ def transcribe_frames(frames_copy, seq_num):
             print(f"[daemon] [{seq_num}] transcription error: {e}", flush=True)
 
 
+def _filter_hallucination(text: str) -> str:
+    """Filter Whisper hallucinations: repeated tokens, silence artifacts.
+
+    Returns cleaned text, or empty string if the entire text is a hallucination.
+    """
+    if not text:
+        return ""
+
+    # Check for repeated token pattern (e.g., "Factor Factor Factor...")
+    words = text.split()
+    if len(words) >= 4:
+        # If any single word makes up 60%+ of the text, it's a hallucination
+        from collections import Counter
+        counts = Counter(w.lower() for w in words)
+        most_common_word, most_common_count = counts.most_common(1)[0]
+        if most_common_count / len(words) >= 0.6:
+            print(f"[daemon] filtered hallucination: repeated '{most_common_word}' ({most_common_count}/{len(words)})", flush=True)
+            return ""
+
+    # Known hallucination phrases
+    lower = text.lower().strip().rstrip('.!,')
+    hallucinations = {
+        "thank you", "thanks", "thank you for watching", "thanks for watching",
+        "subscribe", "please subscribe", "like and subscribe",
+        "you", "bye", "goodbye", "the end",
+    }
+    if lower in hallucinations:
+        return ""
+
+    return text
+
+
+def _is_silent(frames_list) -> bool:
+    """Check if audio frames are mostly silence."""
+    if not frames_list:
+        return True
+    data = np.concatenate(frames_list)
+    if data.ndim > 1:
+        data = data.flatten()
+    rms = float(np.sqrt(np.mean(data**2)))
+    return rms < VAD_THRESHOLD
+
+
 def _transcribe_audio(frames_list):
     """Transcribe a list of audio frames, returning text. Uses _transcribe_lock.
 
     Returns the transcribed text string, or empty string on error.
     """
+    # Skip transcription for silent audio
+    if _is_silent(frames_list):
+        print("[daemon] skipping silent chunk", flush=True)
+        return ""
+
     with _transcribe_lock:
         try:
             data = np.concatenate(frames_list)
@@ -211,6 +259,10 @@ def _transcribe_audio(frames_list):
                 text = r["text"].strip()
 
             elapsed = time.time() - t0
+
+            # Filter hallucinations: repeated tokens, silence artifacts
+            text = _filter_hallucination(text)
+
             print(f"[daemon] chunk transcribed in {elapsed:.2f}s: {text!r}", flush=True)
 
             os.unlink(tmp.name)
